@@ -1,0 +1,63 @@
+name: train_diffusion_transformer_lowdim_uav
+task_name: uav_combat
+
+task:
+  name: ${task_name}
+  _target_: diffusion_policy.dataset.uav_combat_dataset.UAVCombatLowdimDataset
+  zarr_path: /home/dfc/Documents/zdy_documents/data/uav_combat/test_data.zarr # 你刚才生成的路径
+  horizon: 16       # 总步长
+  pad_before: 7     # 历史观察步数 (n_obs_steps - 1)
+  pad_after: 0
+  obs_key: uav_observations
+  action_key: uav_actions
+  seed: 42
+  val_ratio: 0.1
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_transformer_lowdim_policy.DiffusionTransformerLowdimPolicy
+  
+  model:
+    _target_: diffusion_policy.model.diffusion.transformer_for_diffusion.TransformerForDiffusion
+    input_dim: 9        # 对应你的 action_dim (3x3)
+    output_dim: 9       # 对应你的 action_dim
+    horizon: 16
+    n_layer: 8          # Transformer 层数
+    n_head: 4           # 注意力头数
+    n_emb: 256          # 嵌入维度
+    p_drop_emb: 0.1
+    p_drop_attn: 0.1
+    causal_attn: True
+    time_as_cond: True # 将时间步作为条件
+    obs_as_cond: True  # 将历史状态作为条件
+
+  horizon: 16
+  n_obs_steps: 8       # 使用过去 8 步作为输入
+  obs_dim: 42          # 6架无人机 * 7维
+  action_dim: 9        # 3架我方 * 3维
+  num_inference_steps: 10 # 推理时的去噪步数 (DDIM 模式)
+  
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squared_cos_cap_v2
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
+    prediction_type: epsilon
+
+training:
+  device: "cuda:0"
+  seed: 42
+  num_epochs: 500
+  gradient_accumulate_steps: 1
+  lr: 1.0e-4
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  weight_decay: 1.0e-6
+  checkpoint_every: 50
+  val_every: 10
+  sample_every: 50
+
+_target_: diffusion_policy.workspace.train_diffusion_transformer_lowdim_workspace.TrainDiffusionTransformerLowdimWorkspace

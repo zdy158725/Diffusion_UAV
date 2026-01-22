@@ -1,0 +1,5 @@
+name: test_clean
+task_name: uav
+training:
+  seed: 42
+_target_: diffusion_policy.workspace.train_diffusion_transformer_lowdim_workspace.TrainDiffusionTransformerLowdimWorkspace
