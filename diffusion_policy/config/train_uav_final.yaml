@@ -1,28 +1,32 @@
-name: train_uav_transformer
-task_name: uav_combat
+defaults:
+  - _self_
+  - task: uav_combat  # 确保这里指向你刚写的文件名
 
-task:
-  name: ${task_name}
-  dataset:
-    _target_: diffusion_policy.dataset.uav_combat_lowdim_dataset.UAVCombatLowdimDataset
-    zarr_path: /home/dfc/Documents/zdy_documents/data/uav_combat/test_data.zarr
-    horizon: 16
-    pad_before: 7
-    pad_after: 0
-    obs_key: uav_observations
-    action_key: uav_actions
-    seed: 42
-    val_ratio: 0.1
-  env_runner: null
-  val_dataset: ${task.dataset}
+name: train_uav_transformer
+task_name: ${task.name}
+
+horizon: 16
+n_obs_steps: 8
+n_action_steps: 8
+n_latency_steps: 0
+pred_action_steps_only: False
 
 policy:
   _target_: diffusion_policy.policy.diffusion_transformer_lowdim_policy.DiffusionTransformerLowdimPolicy
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  obs_dim: ${task.obs_dim}
+  action_dim: ${task.action_dim}
+  obs_as_cond: True
+  pred_action_steps_only: ${pred_action_steps_only}
   model:
     _target_: diffusion_policy.model.diffusion.transformer_for_diffusion.TransformerForDiffusion
-    input_dim: 9
-    output_dim: 9
-    horizon: 16
+    input_dim: ${task.action_dim}
+    output_dim: ${task.action_dim}
+    horizon: ${horizon}
+    n_obs_steps: ${n_obs_steps}
+    cond_dim: ${task.obs_dim}
     n_layer: 8
     n_head: 4
     n_emb: 256
@@ -31,11 +35,6 @@ policy:
     causal_attn: True
     time_as_cond: True
     obs_as_cond: True
-  horizon: 16
-  n_obs_steps: 8
-  n_action_steps: 8
-  obs_dim: 42
-  action_dim: 9
   num_inference_steps: 10
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
@@ -89,7 +88,7 @@ ema:
 logging:
   project: diffusion_policy_debug
   resume: True
-  mode: online
+  mode: disabled
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
   tags: ["${name}", "${task_name}", "default"]
   id: null

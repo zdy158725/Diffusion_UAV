@@ -1,0 +1,32 @@
+name: uav_combat
+
+obs_dim: 42
+action_dim: 9
+
+# 因为你目前没有 UAV 的仿真环境，不能直接用 PushTKeypointsRunner
+# 我们先用一个最基础的 Runner，或者如果你之前改了代码支持 null，就写 null
+env_runner:
+  _target_: diffusion_policy.env_runner.uav_combat_offline_runner.UAVCombatOfflineRunner
+  dataset: ${..dataset}
+  batch_size: 256
+  num_workers: 0
+  pin_memory: True
+  device: ${training.device}
+  max_batches: null
+  save_plots: True
+  plot_dir: plots
+  plot_interval: 1
+  plot_num_samples: 2
+  plot_action: True
+  plot_curves: True
+  curve_log_path: logs.json.txt
+
+dataset:
+  _target_: diffusion_policy.dataset.uav_combat_lowdim_dataset.UAVCombatLowdimDataset
+  zarr_path: /home/dfc/Documents/zdy_documents/data/uav_combat/test_data.zarr
+  horizon: ${horizon}
+  # 这里的计算公式要保留，它是 Diffusion Policy 采样逻辑的核心
+  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.02
