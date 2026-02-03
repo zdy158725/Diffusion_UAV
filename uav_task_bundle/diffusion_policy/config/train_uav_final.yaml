@@ -1,0 +1,121 @@
+defaults:
+  - _self_
+  - task: uav_combat  # 确保这里指向你刚写的文件名
+
+name: train_uav_transformer
+task_name: ${task.name}
+
+horizon: 16
+n_obs_steps: 8
+n_action_steps: 8
+n_latency_steps: 0
+pred_action_steps_only: False
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_transformer_lowdim_policy.DiffusionTransformerLowdimPolicy
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  obs_dim: ${task.obs_dim}
+  action_dim: ${task.action_dim}
+  obs_as_cond: True
+  pred_action_steps_only: ${pred_action_steps_only}
+  model:
+    _target_: diffusion_policy.model.diffusion.transformer_for_diffusion.TransformerForDiffusion
+    input_dim: ${task.action_dim}
+    output_dim: ${task.action_dim}
+    horizon: ${horizon}
+    n_obs_steps: ${n_obs_steps}
+    cond_dim: ${task.obs_dim}
+    n_layer: 8
+    n_head: 4
+    n_emb: 256
+    p_drop_emb: 0.1
+    p_drop_attn: 0.1
+    causal_attn: True
+    time_as_cond: True
+    obs_as_cond: True
+  num_inference_steps: 10
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: linear
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
+    prediction_type: epsilon
+
+training:
+  device: "cuda:1"
+  seed: 42
+  debug: False
+  resume: False
+  num_epochs: 500
+  gradient_accumulate_steps: 1
+  lr: 1.0e-4
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  weight_decay: 1.0e-6
+  checkpoint_every: 50
+  gradient_accumulate_every: 1
+  use_ema: True          # 必须添加
+  rollout_every: 50
+  val_every: 1
+  sample_every: 5
+  max_train_steps: null  # 建议添加
+  max_val_steps: null    # 建议添加
+  tqdm_interval_sec: 1.0 # 建议添加
+
+# 确保文件最末尾或者最顶层有这些：
+# 刚才报错缺少的优化器
+optimizer:
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-3
+  betas: [0.9, 0.95]
+
+# 之前建议你补上的 EMA
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+# 还有一个可能被检查的日志参数
+logging:
+  project: diffusion_policy_debug
+  resume: True
+  mode: disabled
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "default"]
+  id: null
+  group: null
+
+# 还有一个存盘参数
+checkpoint:
+  topk:
+    monitor_key: test_mean_score
+    mode: max
+    k: 5
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+_target_: diffusion_policy.workspace.train_diffusion_transformer_lowdim_workspace.TrainDiffusionTransformerLowdimWorkspace
