@@ -33,7 +33,9 @@ policy:
   horizon: 16
   n_obs_steps: 8       # 使用过去 8 步作为输入
   obs_dim: 42          # 6架无人机 * 7维
-  action_dim: 9        # 3架我方 * 3维
+  action_dim: 9        # 3架敌方 * 3维位置
+  n_action_steps: 8    # 预测未来 8 步敌方轨迹
+  pred_action_steps_only: True
   num_inference_steps: 10 # 推理时的去噪步数 (DDIM 模式)
   
   noise_scheduler:

@@ -19,6 +19,9 @@ import wandb
 import tqdm
 import numpy as np
 import shutil
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
@@ -29,6 +32,8 @@ from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusers.training_utils import EMAModel
+
+from torchinfo import summary
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -150,6 +155,27 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
+        plot_dir = os.path.join(self.output_dir, 'plots')
+        os.makedirs(plot_dir, exist_ok=True)
+        train_loss_history = []
+        val_loss_history = []
+        val_epoch_history = []
+
+        def save_loss_plot():
+            if len(train_loss_history) == 0:
+                return
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(range(len(train_loss_history)), train_loss_history, label='train')
+            if len(val_loss_history) > 0:
+                ax.plot(val_epoch_history, val_loss_history, label='val')
+            ax.set_xlabel('epoch')
+            ax.set_ylabel('loss')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(os.path.join(plot_dir, 'loss_curve.png'), dpi=150)
+            plt.close(fig)
+
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
@@ -204,6 +230,7 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
+                train_loss_history.append(train_loss)
 
                 # ========= eval for this epoch ==========
                 policy = self.model
@@ -234,6 +261,8 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
+                            val_loss_history.append(val_loss)
+                            val_epoch_history.append(len(train_loss_history)-1)
             
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
@@ -283,6 +312,8 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                         self.save_checkpoint(path=topk_ckpt_path)
                 # ========= eval end for this epoch ==========
                 policy.train()
+
+                save_loss_plot()
 
                 # end of epoch
                 # log of last step is combined with validation and rollout

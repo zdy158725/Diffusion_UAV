@@ -1,7 +1,7 @@
 name: uav_combat
 
 obs_dim: 42
-action_dim: 9
+action_dim: 3
 
 # 因为你目前没有 UAV 的仿真环境，不能直接用 PushTKeypointsRunner
 # 我们先用一个最基础的 Runner，或者如果你之前改了代码支持 null，就写 null

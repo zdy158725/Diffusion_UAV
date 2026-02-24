@@ -66,6 +66,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         self.plot_action = plot_action
         self.plot_curves = plot_curves
         self.curve_log_path = curve_log_path
+        self.action_scale_to_meter = float(getattr(self.dataset, "meters_per_unit", 1.0))
         self.curve_keys = curve_keys or [
             "eval_action_mse",
             "eval_action_mae",
@@ -97,14 +98,17 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 else:
                     pred_action = result["action_pred"]
 
-                mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                mae = torch.nn.functional.l1_loss(pred_action, gt_action)
+                pred_action_m = pred_action * self.action_scale_to_meter
+                gt_action_m = gt_action * self.action_scale_to_meter
+
+                mse = torch.nn.functional.mse_loss(pred_action_m, gt_action_m)
+                mae = torch.nn.functional.l1_loss(pred_action_m, gt_action_m)
                 mse_vals.append(mse.item())
                 mae_vals.append(mae.item())
                 if self.save_plots and self.plot_action and (plot_data is None):
                     plot_data = (
-                        pred_action[: self.plot_num_samples].detach().cpu().numpy(),
-                        gt_action[: self.plot_num_samples].detach().cpu().numpy(),
+                        pred_action_m[: self.plot_num_samples].detach().cpu().numpy(),
+                        gt_action_m[: self.plot_num_samples].detach().cpu().numpy(),
                     )
 
                 if (self.max_batches is not None) and (batch_idx + 1 >= self.max_batches):
@@ -157,11 +161,20 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 ax.plot(x, gt[s, :, d], label="gt", linewidth=1.0)
                 ax.plot(x, pred[s, :, d], label="pred", linewidth=1.0)
                 ax.set_title(f"dim {d}")
+                # Use symmetric y-limits around 0 based on data magnitude
+                m = max(
+                    np.max(np.abs(gt[s, :, d])),
+                    np.max(np.abs(pred[s, :, d]))
+                )
+                if m < 1e-6:
+                    m = 1e-3
+                ax.set_ylim(-1.2 * m, 1.2 * m)
+                ax.set_ylabel("m/step")
                 if d == 0:
                     ax.legend(loc="upper right", fontsize=8)
             for d in range(dims, len(axes)):
                 axes[d].axis("off")
-            fig.suptitle(f"UAV action prediction vs GT (eval {self.eval_count}, sample {s})")
+            fig.suptitle(f"UAV delta-position prediction vs GT (eval {self.eval_count}, sample {s})")
             fig.tight_layout()
             out_path = os.path.join(self.plot_dir, f"action_pred_eval{self.eval_count:04d}_s{s}.png")
             fig.savefig(out_path, dpi=150)
