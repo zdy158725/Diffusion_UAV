@@ -88,18 +88,24 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                 obs_dict = {"obs": batch["obs"]}
                 gt_action = batch["action"]
+                start = policy.n_obs_steps - 1
+                end = start + policy.n_action_steps
 
                 result = policy.predict_action(obs_dict)
                 if policy.pred_action_steps_only:
                     pred_action = result["action"]
-                    start = policy.n_obs_steps - 1
-                    end = start + policy.n_action_steps
                     gt_action = gt_action[:, start:end]
                 else:
                     pred_action = result["action_pred"]
 
+                # For plotting, always show execution window only.
+                plot_pred_action = result["action"]
+                plot_gt_action = batch["action"][:, start:end]
+
                 pred_action_m = pred_action * self.action_scale_to_meter
                 gt_action_m = gt_action * self.action_scale_to_meter
+                plot_pred_m = plot_pred_action * self.action_scale_to_meter
+                plot_gt_m = plot_gt_action * self.action_scale_to_meter
 
                 mse = torch.nn.functional.mse_loss(pred_action_m, gt_action_m)
                 mae = torch.nn.functional.l1_loss(pred_action_m, gt_action_m)
@@ -107,8 +113,8 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 mae_vals.append(mae.item())
                 if self.save_plots and self.plot_action and (plot_data is None):
                     plot_data = (
-                        pred_action_m[: self.plot_num_samples].detach().cpu().numpy(),
-                        gt_action_m[: self.plot_num_samples].detach().cpu().numpy(),
+                        plot_pred_m[: self.plot_num_samples].detach().cpu().numpy(),
+                        plot_gt_m[: self.plot_num_samples].detach().cpu().numpy(),
                     )
 
                 if (self.max_batches is not None) and (batch_idx + 1 >= self.max_batches):

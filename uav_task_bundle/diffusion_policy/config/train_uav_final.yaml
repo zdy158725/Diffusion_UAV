@@ -52,7 +52,7 @@ training:
   seed: 42
   debug: False
   resume: False
-  num_epochs: 500
+  num_epochs: 150
   gradient_accumulate_steps: 1
   lr: 1.0e-4
   lr_scheduler: cosine

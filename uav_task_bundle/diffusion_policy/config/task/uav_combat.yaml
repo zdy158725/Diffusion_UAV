@@ -23,7 +23,7 @@ env_runner:
 
 dataset:
   _target_: diffusion_policy.dataset.uav_combat_lowdim_dataset.UAVCombatLowdimDataset
-  zarr_path: ${hydra:runtime.cwd}/data/uav_combat/test_data.zarr
+  zarr_path: ${hydra:runtime.cwd}/data/uav_combat/test_data_mode_switch.zarr
   horizon: ${horizon}
   # 这里的计算公式要保留，它是 Diffusion Policy 采样逻辑的核心
   pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
