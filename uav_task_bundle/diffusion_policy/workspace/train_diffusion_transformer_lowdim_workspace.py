@@ -19,6 +19,7 @@ import wandb
 import tqdm
 import numpy as np
 import shutil
+import time
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -160,6 +161,9 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
         train_loss_history = []
         val_loss_history = []
         val_epoch_history = []
+        eval_ade_history = []
+        eval_fde_history = []
+        eval_epoch_history = []
 
         def save_loss_plot():
             if len(train_loss_history) == 0:
@@ -176,8 +180,31 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
             fig.savefig(os.path.join(plot_dir, 'loss_curve.png'), dpi=150)
             plt.close(fig)
 
-        with JsonLogger(log_path) as json_logger:
+        def save_traj_error_plot():
+            if len(eval_epoch_history) == 0:
+                return
+            fig, ax = plt.subplots(figsize=(6, 4))
+            if len(eval_ade_history) > 0:
+                ax.plot(eval_epoch_history, eval_ade_history, label='ADE (m)')
+            if len(eval_fde_history) > 0:
+                ax.plot(eval_epoch_history, eval_fde_history, label='FDE (m)')
+            ax.set_xlabel('epoch')
+            ax.set_ylabel('error (m)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(os.path.join(plot_dir, 'traj_error_curve.png'), dpi=150)
+            plt.close(fig)
+
+        train_start_time = time.time()
+        with tqdm.tqdm(
+            total=cfg.training.num_epochs,
+            desc="Training progress",
+            unit="epoch",
+            mininterval=cfg.training.tqdm_interval_sec
+        ) as epoch_pbar, JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
+                epoch_start_time = time.time()
                 step_log = dict()
                 # ========= train for this epoch ==========
                 train_losses = list()
@@ -243,6 +270,14 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
+                    ade = runner_log.get('eval_traj_ade_m', None)
+                    fde = runner_log.get('eval_traj_fde_m', None)
+                    has_ade = (ade is not None) and np.isfinite(ade)
+                    has_fde = (fde is not None) and np.isfinite(fde)
+                    if has_ade or has_fde:
+                        eval_epoch_history.append(len(train_loss_history)-1)
+                        eval_ade_history.append(float(ade) if has_ade else np.nan)
+                        eval_fde_history.append(float(fde) if has_fde else np.nan)
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
@@ -314,6 +349,26 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                 policy.train()
 
                 save_loss_plot()
+                save_traj_error_plot()
+
+                epoch_time_sec = time.time() - epoch_start_time
+                elapsed_sec = time.time() - train_start_time
+                done_epochs = local_epoch_idx + 1
+                avg_epoch_time = elapsed_sec / max(done_epochs, 1)
+                eta_sec = max(cfg.training.num_epochs - done_epochs, 0) * avg_epoch_time
+                step_log['epoch_time_sec'] = epoch_time_sec
+                step_log['eta_sec'] = eta_sec
+
+                postfix = {
+                    'train_loss': f"{train_loss:.4f}",
+                    'eta_min': f"{eta_sec/60.0:.1f}",
+                }
+                if 'val_loss' in step_log:
+                    postfix['val_loss'] = f"{step_log['val_loss']:.4f}"
+                if 'eval_traj_ade_m' in step_log:
+                    postfix['ade_m'] = f"{step_log['eval_traj_ade_m']:.2f}"
+                epoch_pbar.set_postfix(postfix, refresh=False)
+                epoch_pbar.update(1)
 
                 # end of epoch
                 # log of last step is combined with validation and rollout

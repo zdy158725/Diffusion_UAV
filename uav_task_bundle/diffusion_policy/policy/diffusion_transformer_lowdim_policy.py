@@ -22,6 +22,10 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             num_inference_steps=None,
             obs_as_cond=False,
             pred_action_steps_only=False,
+            velocity_loss_weight: float=0.0,
+            short_horizon_loss_weight: float=0.0,
+            short_horizon_focus_steps: int=4,
+            short_horizon_focus_gain: float=3.0,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -45,6 +49,10 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         self.n_obs_steps = n_obs_steps
         self.obs_as_cond = obs_as_cond
         self.pred_action_steps_only = pred_action_steps_only
+        self.velocity_loss_weight = float(velocity_loss_weight)
+        self.short_horizon_loss_weight = float(short_horizon_loss_weight)
+        self.short_horizon_focus_steps = int(short_horizon_focus_steps)
+        self.short_horizon_focus_gain = float(short_horizon_focus_gain)
         self.kwargs = kwargs
 
         if num_inference_steps is None:
@@ -222,13 +230,54 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         pred_type = self.noise_scheduler.config.prediction_type 
         if pred_type == 'epsilon':
             target = noise
+            alpha_t = self.noise_scheduler.alphas_cumprod.to(
+                device=trajectory.device, dtype=trajectory.dtype
+            )[timesteps]
+            alpha_t = alpha_t.view(-1, *([1] * (trajectory.ndim - 1)))
+            x0_pred = (noisy_trajectory - torch.sqrt(1.0 - alpha_t) * pred) / torch.sqrt(alpha_t)
         elif pred_type == 'sample':
             target = trajectory
+            x0_pred = pred
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")
 
         loss = F.mse_loss(pred, target, reduction='none')
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        loss = loss.mean()
-        return loss
+        total_loss = loss.mean()
+
+        if self.short_horizon_loss_weight > 0.0 and trajectory.shape[1] > 0:
+            T = trajectory.shape[1]
+            if self.pred_action_steps_only:
+                focus_start = 0
+            else:
+                focus_start = min(max(self.n_obs_steps - 1, 0), T - 1)
+            focus_steps = max(self.short_horizon_focus_steps, 1)
+            focus_end = min(focus_start + focus_steps, T)
+
+            step_weights = torch.ones(
+                (1, T, 1), device=trajectory.device, dtype=trajectory.dtype
+            )
+            if focus_end > focus_start:
+                step_weights[:, focus_start:focus_end, :] = self.short_horizon_focus_gain
+
+            recon_err = (x0_pred - trajectory) ** 2
+            recon_err = recon_err * loss_mask.type(recon_err.dtype) * step_weights
+            recon_denom = (
+                loss_mask.type(recon_err.dtype) * step_weights
+            ).sum().clamp(min=1.0)
+            short_horizon_loss = recon_err.sum() / recon_denom
+            total_loss = total_loss + self.short_horizon_loss_weight * short_horizon_loss
+
+        if self.velocity_loss_weight > 0.0 and trajectory.shape[1] > 1:
+            vel_pred = x0_pred[:, 1:, :] - x0_pred[:, :-1, :]
+            vel_target = trajectory[:, 1:, :] - trajectory[:, :-1, :]
+            vel_mask = loss_mask[:, 1:, :] & loss_mask[:, :-1, :]
+
+            vel_err = (vel_pred - vel_target) ** 2
+            vel_err = vel_err * vel_mask.type(vel_err.dtype)
+            vel_denom = vel_mask.type(vel_err.dtype).sum().clamp(min=1.0)
+            vel_loss = vel_err.sum() / vel_denom
+            total_loss = total_loss + self.velocity_loss_weight * vel_loss
+
+        return total_loss

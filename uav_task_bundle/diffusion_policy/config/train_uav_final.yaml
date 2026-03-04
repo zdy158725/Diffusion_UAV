@@ -7,7 +7,7 @@ task_name: ${task.name}
 
 horizon: 16
 n_obs_steps: 8
-n_action_steps: 8
+n_action_steps: 3
 n_latency_steps: 0
 pred_action_steps_only: False
 
@@ -20,6 +20,10 @@ policy:
   action_dim: ${task.action_dim}
   obs_as_cond: True
   pred_action_steps_only: ${pred_action_steps_only}
+  velocity_loss_weight: 0.0
+  short_horizon_loss_weight: 0.0
+  short_horizon_focus_steps: 3
+  short_horizon_focus_gain: 3.0
   model:
     _target_: diffusion_policy.model.diffusion.transformer_for_diffusion.TransformerForDiffusion
     input_dim: ${task.action_dim}
@@ -30,8 +34,8 @@ policy:
     n_layer: 8
     n_head: 4
     n_emb: 256
-    p_drop_emb: 0.1
-    p_drop_attn: 0.1
+    p_drop_emb: 0.2
+    p_drop_attn: 0.2
     causal_attn: True
     time_as_cond: True
     obs_as_cond: True
@@ -48,20 +52,20 @@ policy:
     prediction_type: epsilon
 
 training:
-  device: "cuda:1"
+  device: "cuda:0"
   seed: 42
   debug: False
   resume: False
   num_epochs: 150
   gradient_accumulate_steps: 1
-  lr: 1.0e-4
+  lr: 5e-5
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  weight_decay: 1.0e-6
+  weight_decay: 1.0e-4
   checkpoint_every: 50
   gradient_accumulate_every: 1
   use_ema: True          # 必须添加
-  rollout_every: 50
+  rollout_every: 1
   val_every: 1
   sample_every: 5
   max_train_steps: null  # 建议添加

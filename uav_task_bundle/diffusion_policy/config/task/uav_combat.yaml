@@ -15,7 +15,7 @@ env_runner:
   max_batches: null
   save_plots: True
   plot_dir: plots
-  plot_interval: 1
+  plot_interval: 10
   plot_num_samples: 2
   plot_action: True
   plot_curves: True
@@ -29,4 +29,4 @@ dataset:
   pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
-  val_ratio: 0.02
+  val_ratio: 0.1
