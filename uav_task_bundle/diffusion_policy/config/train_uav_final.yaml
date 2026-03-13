@@ -5,11 +5,11 @@ defaults:
 name: train_uav_transformer
 task_name: ${task.name}
 
-horizon: 16
-n_obs_steps: 8
+horizon: 15
+n_obs_steps: 12
 n_action_steps: 3
 n_latency_steps: 0
-pred_action_steps_only: False
+pred_action_steps_only: True
 
 policy:
   _target_: diffusion_policy.policy.diffusion_transformer_lowdim_policy.DiffusionTransformerLowdimPolicy
@@ -22,6 +22,7 @@ policy:
   pred_action_steps_only: ${pred_action_steps_only}
   velocity_loss_weight: 0.0
   short_horizon_loss_weight: 0.0
+  terminal_pos_loss_weight: 0.1
   short_horizon_focus_steps: 3
   short_horizon_focus_gain: 3.0
   model:
@@ -36,10 +37,11 @@ policy:
     n_emb: 256
     p_drop_emb: 0.2
     p_drop_attn: 0.2
+    n_cond_layers: 4
     causal_attn: True
     time_as_cond: True
     obs_as_cond: True
-  num_inference_steps: 10
+  num_inference_steps: 20
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100
@@ -53,7 +55,7 @@ policy:
 
 training:
   device: "cuda:0"
-  seed: 42
+  seed: 32
   debug: False
   resume: False
   num_epochs: 150
@@ -61,7 +63,7 @@ training:
   lr: 5e-5
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  weight_decay: 1.0e-4
+  weight_decay: 1.0e-3
   checkpoint_every: 50
   gradient_accumulate_every: 1
   use_ema: True          # 必须添加
@@ -75,8 +77,8 @@ training:
 # 确保文件最末尾或者最顶层有这些：
 # 刚才报错缺少的优化器
 optimizer:
-  learning_rate: 1.0e-4
-  weight_decay: 1.0e-3
+  learning_rate: ${training.lr}
+  weight_decay: 1.0e-4
   betas: [0.9, 0.95]
 
 # 之前建议你补上的 EMA

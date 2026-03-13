@@ -1,7 +1,7 @@
 import argparse
 import os
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import zarr
@@ -42,6 +42,75 @@ class SimConfig:
     meters_per_unit: float = 1000.0
 
 
+def _get_difficulty_params(difficulty: str) -> Dict[str, object]:
+    if difficulty == "easy":
+        return {
+            "init_modes": (CRUISE, ORBIT_LEFT, ORBIT_RIGHT),
+            "mode_library": (CRUISE, ORBIT_LEFT, ORBIT_RIGHT, RETURN_CENTER),
+            "enemy_acc_noise_std": 0.010,
+            "z_acc_noise_std": 0.005,
+            "own_noise_std": 0.008,
+            "min_mode_dwell": 72,
+            "v_max_xy_scale": 0.90,
+            "v_max_z_scale": 0.70,
+        }
+    if difficulty == "medium":
+        return {
+            "init_modes": (CRUISE, ORBIT_LEFT, ORBIT_RIGHT, RETURN_CENTER),
+            "mode_library": (CRUISE, ORBIT_LEFT, ORBIT_RIGHT, RETURN_CENTER, EVADE, CLIMB, DIVE),
+            "enemy_acc_noise_std": 0.020,
+            "z_acc_noise_std": 0.012,
+            "own_noise_std": 0.012,
+            "min_mode_dwell": 48,
+            "v_max_xy_scale": 0.96,
+            "v_max_z_scale": 0.85,
+        }
+    if difficulty == "hard":
+        return {
+            "init_modes": (CRUISE, ORBIT_LEFT, ORBIT_RIGHT),
+            "mode_library": tuple(sorted(MODE_NAMES.keys())),
+            "enemy_acc_noise_std": None,
+            "z_acc_noise_std": None,
+            "own_noise_std": None,
+            "min_mode_dwell": None,
+            "v_max_xy_scale": 1.0,
+            "v_max_z_scale": 1.0,
+        }
+    raise ValueError(f"Unsupported difficulty: {difficulty}")
+
+
+def _make_effective_config(base_cfg: SimConfig, difficulty: str) -> Tuple[SimConfig, Dict[str, object]]:
+    diff = _get_difficulty_params(difficulty)
+    cfg = SimConfig(
+        dt=base_cfg.dt,
+        v_max_xy=base_cfg.v_max_xy * float(diff["v_max_xy_scale"]),
+        v_max_z=base_cfg.v_max_z * float(diff["v_max_z_scale"]),
+        own_ctrl_kp=base_cfg.own_ctrl_kp,
+        own_noise_std=(
+            base_cfg.own_noise_std
+            if diff["own_noise_std"] is None
+            else float(diff["own_noise_std"])
+        ),
+        enemy_acc_noise_std=(
+            base_cfg.enemy_acc_noise_std
+            if diff["enemy_acc_noise_std"] is None
+            else float(diff["enemy_acc_noise_std"])
+        ),
+        z_acc_noise_std=(
+            base_cfg.z_acc_noise_std
+            if diff["z_acc_noise_std"] is None
+            else float(diff["z_acc_noise_std"])
+        ),
+        min_mode_dwell=(
+            base_cfg.min_mode_dwell
+            if diff["min_mode_dwell"] is None
+            else int(diff["min_mode_dwell"])
+        ),
+        meters_per_unit=base_cfg.meters_per_unit,
+    )
+    return cfg, diff
+
+
 def _safe_norm(vec: np.ndarray, eps: float = 1e-6) -> float:
     return float(np.linalg.norm(vec) + eps)
 
@@ -61,6 +130,7 @@ def _select_mode(
     enemy_pos: np.ndarray,
     own_pos: np.ndarray,
     cfg: SimConfig,
+    difficulty: str,
 ) -> int:
     if hold_steps < cfg.min_mode_dwell:
         return cur_mode
@@ -71,45 +141,79 @@ def _select_mode(
     boundary_margin = float(np.min(np.concatenate([enemy_pos, 1.0 - enemy_pos])))
     z = float(enemy_pos[2])
 
-    # Hard safety rule: near map boundary, return to center.
     if boundary_margin < 0.05:
         return RETURN_CENTER
 
-    # Threat-dependent switching probability (structured randomness).
-    p_switch = 0.03
-    if nearest_dist < 0.18:
-        p_switch = 0.45
-    elif nearest_dist < 0.30:
-        p_switch = 0.20
-    elif boundary_margin < 0.10:
-        p_switch = 0.22
+    if difficulty == "easy":
+        p_switch = 0.01
+        if nearest_dist < 0.18:
+            p_switch = 0.12
+        elif nearest_dist < 0.30:
+            p_switch = 0.05
+        elif boundary_margin < 0.10:
+            p_switch = 0.10
+    elif difficulty == "medium":
+        p_switch = 0.02
+        if nearest_dist < 0.18:
+            p_switch = 0.26
+        elif nearest_dist < 0.30:
+            p_switch = 0.12
+        elif boundary_margin < 0.10:
+            p_switch = 0.14
+    else:
+        p_switch = 0.03
+        if nearest_dist < 0.18:
+            p_switch = 0.45
+        elif nearest_dist < 0.30:
+            p_switch = 0.20
+        elif boundary_margin < 0.10:
+            p_switch = 0.22
 
     if rng.uniform() > p_switch:
         return cur_mode
 
-    if nearest_dist < 0.18:
-        weights = {
-            EVADE: 0.55,
-            ORBIT_LEFT: 0.12,
-            ORBIT_RIGHT: 0.12,
-            ZIGZAG: 0.16,
-            CRUISE: 0.05,
-        }
-    elif z < 0.25:
-        weights = {CLIMB: 0.58, CRUISE: 0.22, ORBIT_LEFT: 0.10, ORBIT_RIGHT: 0.10}
-    elif z > 0.85:
-        weights = {DIVE: 0.58, CRUISE: 0.22, ORBIT_LEFT: 0.10, ORBIT_RIGHT: 0.10}
-    elif boundary_margin < 0.12:
-        weights = {RETURN_CENTER: 0.62, CRUISE: 0.18, ORBIT_LEFT: 0.10, ORBIT_RIGHT: 0.10}
+    if difficulty == "easy":
+        if boundary_margin < 0.12:
+            weights = {RETURN_CENTER: 0.70, CRUISE: 0.18, ORBIT_LEFT: 0.06, ORBIT_RIGHT: 0.06}
+        elif nearest_dist < 0.18:
+            weights = {CRUISE: 0.20, ORBIT_LEFT: 0.40, ORBIT_RIGHT: 0.40}
+        else:
+            weights = {CRUISE: 0.58, ORBIT_LEFT: 0.21, ORBIT_RIGHT: 0.21}
+    elif difficulty == "medium":
+        if nearest_dist < 0.18:
+            weights = {RETURN_CENTER: 0.18, ORBIT_LEFT: 0.28, ORBIT_RIGHT: 0.28, CRUISE: 0.14, EVADE: 0.12}
+        elif z < 0.25:
+            weights = {CLIMB: 0.36, CRUISE: 0.34, ORBIT_LEFT: 0.15, ORBIT_RIGHT: 0.15}
+        elif z > 0.85:
+            weights = {DIVE: 0.36, CRUISE: 0.34, ORBIT_LEFT: 0.15, ORBIT_RIGHT: 0.15}
+        elif boundary_margin < 0.12:
+            weights = {RETURN_CENTER: 0.56, CRUISE: 0.22, ORBIT_LEFT: 0.11, ORBIT_RIGHT: 0.11}
+        else:
+            weights = {CRUISE: 0.42, ORBIT_LEFT: 0.18, ORBIT_RIGHT: 0.18, CLIMB: 0.11, DIVE: 0.11}
     else:
-        weights = {
-            CRUISE: 0.36,
-            ORBIT_LEFT: 0.14,
-            ORBIT_RIGHT: 0.14,
-            ZIGZAG: 0.18,
-            CLIMB: 0.09,
-            DIVE: 0.09,
-        }
+        if nearest_dist < 0.18:
+            weights = {
+                EVADE: 0.55,
+                ORBIT_LEFT: 0.12,
+                ORBIT_RIGHT: 0.12,
+                ZIGZAG: 0.16,
+                CRUISE: 0.05,
+            }
+        elif z < 0.25:
+            weights = {CLIMB: 0.58, CRUISE: 0.22, ORBIT_LEFT: 0.10, ORBIT_RIGHT: 0.10}
+        elif z > 0.85:
+            weights = {DIVE: 0.58, CRUISE: 0.22, ORBIT_LEFT: 0.10, ORBIT_RIGHT: 0.10}
+        elif boundary_margin < 0.12:
+            weights = {RETURN_CENTER: 0.62, CRUISE: 0.18, ORBIT_LEFT: 0.10, ORBIT_RIGHT: 0.10}
+        else:
+            weights = {
+                CRUISE: 0.36,
+                ORBIT_LEFT: 0.14,
+                ORBIT_RIGHT: 0.14,
+                ZIGZAG: 0.18,
+                CLIMB: 0.09,
+                DIVE: 0.09,
+            }
     return _sample_mode(rng, weights)
 
 
@@ -134,7 +238,6 @@ def _enemy_mode_accel(
     to_center_norm = _safe_norm(to_center)
     to_center_dir = to_center / to_center_norm
 
-    # Base damping
     acc = np.array([-0.25 * enemy_vel[0], -0.25 * enemy_vel[1], -0.18 * enemy_vel[2]], dtype=np.float32)
 
     if mode == CRUISE:
@@ -171,13 +274,15 @@ def generate_uav_dataset_mode_switch(
     episode_len: int,
     seed: int = 42,
     pattern: str = "structured",
+    difficulty: str = "easy",
     config: SimConfig = SimConfig(),
 ) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
     rng = np.random.default_rng(seed)
+    cfg, diff = _make_effective_config(config, difficulty)
 
     obs_dim = 42
-    action_dim = 3  # enemy0 delta position
+    action_dim = 3
     n_own = 3
     n_enemy = 3
 
@@ -186,7 +291,19 @@ def generate_uav_dataset_mode_switch(
     episode_ends: List[int] = []
     current_idx = 0
 
-    print(f"Generating mode-switch UAV data: episodes={num_episodes}, ep_len={episode_len}")
+    print(
+        f"Generating mode-switch UAV data: episodes={num_episodes}, "
+        f"ep_len={episode_len}, difficulty={difficulty}"
+    )
+    print(
+        "Effective config: "
+        f"min_mode_dwell={cfg.min_mode_dwell}, "
+        f"enemy_acc_noise_std={cfg.enemy_acc_noise_std:.3f}, "
+        f"z_acc_noise_std={cfg.z_acc_noise_std:.3f}, "
+        f"own_noise_std={cfg.own_noise_std:.3f}"
+    )
+
+    init_modes = np.asarray(diff["init_modes"], dtype=np.int32)
 
     for _ in range(num_episodes):
         obs = np.zeros((episode_len, obs_dim), dtype=np.float32)
@@ -197,7 +314,7 @@ def generate_uav_dataset_mode_switch(
         own_vel = rng.uniform(-0.05, 0.05, (n_own, 3)).astype(np.float32)
         enemy_vel = rng.uniform(-0.05, 0.05, (n_enemy, 3)).astype(np.float32)
 
-        enemy_mode = rng.integers(low=0, high=3, size=(n_enemy,), endpoint=False).astype(np.int32)
+        enemy_mode = rng.choice(init_modes, size=(n_enemy,)).astype(np.int32)
         enemy_mode_hold = np.zeros((n_enemy,), dtype=np.int32)
         enemy_zigzag_phase = rng.uniform(0.0, 2.0 * np.pi, size=(n_enemy,)).astype(np.float32)
 
@@ -208,7 +325,6 @@ def generate_uav_dataset_mode_switch(
             if pattern == "random":
                 enemy_vel += rng.normal(0.0, 0.02, size=enemy_vel.shape).astype(np.float32)
             else:
-                # Mode switching by state of both sides.
                 for k in range(n_enemy):
                     new_mode = _select_mode(
                         rng=rng,
@@ -216,7 +332,8 @@ def generate_uav_dataset_mode_switch(
                         hold_steps=int(enemy_mode_hold[k]),
                         enemy_pos=enemy_pos[k],
                         own_pos=own_pos,
-                        cfg=config,
+                        cfg=cfg,
+                        difficulty=difficulty,
                     )
                     if new_mode != enemy_mode[k]:
                         enemy_mode[k] = new_mode
@@ -237,38 +354,37 @@ def generate_uav_dataset_mode_switch(
                         zigzag_phase=float(enemy_zigzag_phase[k]),
                     )
 
-                enemy_acc += rng.normal(0.0, config.enemy_acc_noise_std, size=enemy_acc.shape).astype(np.float32)
-                enemy_acc[:, 2] += rng.normal(0.0, config.z_acc_noise_std, size=(n_enemy,)).astype(np.float32)
+                enemy_acc += rng.normal(0.0, cfg.enemy_acc_noise_std, size=enemy_acc.shape).astype(np.float32)
+                enemy_acc[:, 2] += rng.normal(0.0, cfg.z_acc_noise_std, size=(n_enemy,)).astype(np.float32)
 
                 enemy_vel[:, 0] = np.clip(
-                    enemy_vel[:, 0] + enemy_acc[:, 0] * config.dt, -config.v_max_xy, config.v_max_xy
+                    enemy_vel[:, 0] + enemy_acc[:, 0] * cfg.dt, -cfg.v_max_xy, cfg.v_max_xy
                 )
                 enemy_vel[:, 1] = np.clip(
-                    enemy_vel[:, 1] + enemy_acc[:, 1] * config.dt, -config.v_max_xy, config.v_max_xy
+                    enemy_vel[:, 1] + enemy_acc[:, 1] * cfg.dt, -cfg.v_max_xy, cfg.v_max_xy
                 )
                 enemy_vel[:, 2] = np.clip(
-                    enemy_vel[:, 2] + enemy_acc[:, 2] * config.dt, -config.v_max_z, config.v_max_z
+                    enemy_vel[:, 2] + enemy_acc[:, 2] * cfg.dt, -cfg.v_max_z, cfg.v_max_z
                 )
 
-            enemy_pos = np.clip(enemy_pos + enemy_vel * config.dt, 0.0, 1.0)
+            enemy_pos = np.clip(enemy_pos + enemy_vel * cfg.dt, 0.0, 1.0)
 
-            # Own side simple pursuit controller.
             rel = enemy_pos[:, :2] - own_pos[:, :2]
-            own_acc_xy = np.clip(config.own_ctrl_kp * rel, -1.0, 1.0)
+            own_acc_xy = np.clip(cfg.own_ctrl_kp * rel, -1.0, 1.0)
             own_roll = np.arctan2(rel[:, 1], rel[:, 0]) / np.pi
             own_act = np.stack([own_acc_xy[:, 0], own_acc_xy[:, 1], own_roll], axis=1).astype(np.float32)
-            own_act += rng.normal(0.0, config.own_noise_std, size=own_act.shape).astype(np.float32)
+            own_act += rng.normal(0.0, cfg.own_noise_std, size=own_act.shape).astype(np.float32)
             own_act = np.clip(own_act, -1.0, 1.0)
 
             own_vel[:, 0] = np.clip(
-                own_vel[:, 0] + own_act[:, 0] * config.dt, -config.v_max_xy, config.v_max_xy
+                own_vel[:, 0] + own_act[:, 0] * cfg.dt, -cfg.v_max_xy, cfg.v_max_xy
             )
             own_vel[:, 1] = np.clip(
-                own_vel[:, 1] + own_act[:, 1] * config.dt, -config.v_max_xy, config.v_max_xy
+                own_vel[:, 1] + own_act[:, 1] * cfg.dt, -cfg.v_max_xy, cfg.v_max_xy
             )
             own_vel[:, 2] = 0.90 * own_vel[:, 2] + rng.normal(0.0, 0.005, size=(n_own,)).astype(np.float32)
             own_vel[:, 2] = np.clip(own_vel[:, 2], -0.04, 0.04)
-            own_pos = np.clip(own_pos + own_vel * config.dt, 0.0, 1.0)
+            own_pos = np.clip(own_pos + own_vel * cfg.dt, 0.0, 1.0)
 
             dist = np.linalg.norm(rel, axis=1)
             own_hp = np.clip(1.0 - dist / 1.5, 0.0, 1.0)
@@ -301,7 +417,6 @@ def generate_uav_dataset_mode_switch(
                 )
 
             obs[t] = np.asarray(obs_t, dtype=np.float32).reshape(-1)
-
             delta_enemy0 = enemy_pos[0] - prev_enemy_pos[0]
             action[t] = delta_enemy0.astype(np.float32)
             prev_enemy_pos = enemy_pos.copy()
@@ -321,12 +436,15 @@ def generate_uav_dataset_mode_switch(
     store = zarr.DirectoryStore(save_path)
     root = zarr.group(store=store, overwrite=True)
     root.attrs["author"] = "UAV_Project"
-    root.attrs["version"] = "2.0-mode-switch"
-    root.attrs["description"] = "UAV enemy0 delta with state-conditioned mode library"
+    root.attrs["version"] = f"2.1-mode-switch-{difficulty}"
+    root.attrs["description"] = (
+        f"UAV enemy0 delta with state-conditioned mode library ({difficulty})"
+    )
     root.attrs["action_target"] = "enemy0_delta_position"
     root.attrs["delta_max_abs"] = max_abs_delta.tolist()
-    root.attrs["meters_per_unit"] = float(config.meters_per_unit)
-    root.attrs["mode_library"] = [MODE_NAMES[i] for i in sorted(MODE_NAMES.keys())]
+    root.attrs["meters_per_unit"] = float(cfg.meters_per_unit)
+    root.attrs["difficulty"] = difficulty
+    root.attrs["mode_library"] = [MODE_NAMES[i] for i in diff["mode_library"]]
 
     data_group = root.create_group("data")
     data_group.create_dataset("uav_observations", data=full_obs, chunks=(1000, obs_dim))
@@ -338,7 +456,7 @@ def generate_uav_dataset_mode_switch(
     print(f"Saved: {os.path.abspath(save_path)}")
     print(f"Samples: {full_obs.shape[0]}")
     print(f"delta_max_abs: {max_abs_delta}")
-    print(f"mode_library: {[MODE_NAMES[i] for i in sorted(MODE_NAMES.keys())]}")
+    print(f"mode_library: {[MODE_NAMES[i] for i in diff['mode_library']]}")
 
 
 def parse_args():
@@ -353,6 +471,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pattern", type=str, default="structured", choices=["structured", "random"])
     parser.add_argument("--meters_per_unit", type=float, default=1000.0)
+    parser.add_argument("--difficulty", type=str, default="easy", choices=["easy", "medium", "hard"])
     return parser.parse_args()
 
 
@@ -365,5 +484,6 @@ if __name__ == "__main__":
         episode_len=args.episode_len,
         seed=args.seed,
         pattern=args.pattern,
+        difficulty=args.difficulty,
         config=cfg,
     )

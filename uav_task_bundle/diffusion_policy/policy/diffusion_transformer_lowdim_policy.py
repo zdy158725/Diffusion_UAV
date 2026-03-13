@@ -26,6 +26,8 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             short_horizon_loss_weight: float=0.0,
             short_horizon_focus_steps: int=4,
             short_horizon_focus_gain: float=3.0,
+            terminal_pos_loss_weight: float=0.0,
+            terminal_pos_loss_power: float=1.0,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -53,16 +55,33 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         self.short_horizon_loss_weight = float(short_horizon_loss_weight)
         self.short_horizon_focus_steps = int(short_horizon_focus_steps)
         self.short_horizon_focus_gain = float(short_horizon_focus_gain)
+        self.terminal_pos_loss_weight = float(terminal_pos_loss_weight)
+        self.terminal_pos_loss_power = float(terminal_pos_loss_power)
         self.kwargs = kwargs
 
         if num_inference_steps is None:
             num_inference_steps = noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
+
+    def get_action_window_indices(self) -> Tuple[int, int]:
+        start = self.n_obs_steps
+        end = start + self.n_action_steps
+        return start, end
+
+    def get_action_anchor_obs_index(self) -> int:
+        return self.n_obs_steps - 1
+
+    def get_action_token_offset(self) -> int:
+        if self.pred_action_steps_only:
+            start, _ = self.get_action_window_indices()
+            return start
+        return 0
     
     # ========= inference  ============
     def conditional_sample(self, 
             condition_data, condition_mask,
             cond=None, generator=None,
+            token_offset=0,
             # keyword arguments to scheduler.step
             **kwargs
             ):
@@ -83,7 +102,7 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             trajectory[condition_mask] = condition_data[condition_mask]
 
             # 2. predict model output
-            model_output = model(trajectory, t, cond)
+            model_output = model(trajectory, t, cond, token_offset=token_offset)
 
             # 3. compute previous image: x_t -> x_t-1
             trajectory = scheduler.step(
@@ -141,6 +160,7 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             cond_data, 
             cond_mask,
             cond=cond,
+            token_offset=self.get_action_token_offset(),
             **self.kwargs)
         
         # unnormalize prediction
@@ -151,8 +171,7 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         if self.pred_action_steps_only:
             action = action_pred
         else:
-            start = To - 1
-            end = start + self.n_action_steps
+            start, end = self.get_action_window_indices()
             action = action_pred[:,start:end]
         
         result = {
@@ -192,9 +211,7 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         if self.obs_as_cond:
             cond = obs[:,:self.n_obs_steps,:]
             if self.pred_action_steps_only:
-                To = self.n_obs_steps
-                start = To - 1
-                end = start + self.n_action_steps
+                start, end = self.get_action_window_indices()
                 trajectory = action[:,start:end]
         else:
             trajectory = torch.cat([action, obs], dim=-1)
@@ -225,7 +242,12 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         noisy_trajectory[condition_mask] = trajectory[condition_mask]
         
         # Predict the noise residual
-        pred = self.model(noisy_trajectory, timesteps, cond)
+        pred = self.model(
+            noisy_trajectory,
+            timesteps,
+            cond,
+            token_offset=self.get_action_token_offset()
+        )
 
         pred_type = self.noise_scheduler.config.prediction_type 
         if pred_type == 'epsilon':
@@ -251,7 +273,7 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             if self.pred_action_steps_only:
                 focus_start = 0
             else:
-                focus_start = min(max(self.n_obs_steps - 1, 0), T - 1)
+                focus_start = min(max(self.n_obs_steps, 0), T - 1)
             focus_steps = max(self.short_horizon_focus_steps, 1)
             focus_end = min(focus_start + focus_steps, T)
 
@@ -279,5 +301,31 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             vel_denom = vel_mask.type(vel_err.dtype).sum().clamp(min=1.0)
             vel_loss = vel_err.sum() / vel_denom
             total_loss = total_loss + self.velocity_loss_weight * vel_loss
+
+        if self.terminal_pos_loss_weight > 0.0 and trajectory.shape[1] > 0:
+            if self.pred_action_steps_only:
+                focus_pred = x0_pred
+                focus_target = trajectory
+                focus_mask = loss_mask
+            else:
+                T = trajectory.shape[1]
+                start = min(max(self.n_obs_steps, 0), T - 1)
+                end = min(start + self.n_action_steps, T)
+                focus_pred = x0_pred[:, start:end, :]
+                focus_target = trajectory[:, start:end, :]
+                focus_mask = loss_mask[:, start:end, :]
+
+            if focus_pred.shape[1] > 0:
+                pred_pos = torch.cumsum(focus_pred, dim=1)
+                target_pos = torch.cumsum(focus_target, dim=1)
+                final_sq_err = (pred_pos[:, -1, :] - target_pos[:, -1, :]) ** 2
+                final_mask = focus_mask[:, -1, :].type(final_sq_err.dtype)
+                denom = final_mask.sum().clamp(min=1.0)
+                terminal_pos_loss = (final_sq_err * final_mask).sum() / denom
+                if self.terminal_pos_loss_power != 1.0:
+                    terminal_pos_loss = torch.pow(
+                        terminal_pos_loss + 1e-8, self.terminal_pos_loss_power
+                    )
+                total_loss = total_loss + self.terminal_pos_loss_weight * terminal_pos_loss
 
         return total_loss

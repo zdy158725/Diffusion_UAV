@@ -9,6 +9,9 @@ class BaseLowdimDataset(torch.utils.data.Dataset):
         # return an empty dataset by default
         return BaseLowdimDataset()
 
+    def get_collate_fn(self):
+        return None
+
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         raise NotImplementedError()
 

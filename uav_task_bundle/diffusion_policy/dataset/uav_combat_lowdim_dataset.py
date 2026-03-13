@@ -13,15 +13,33 @@ from diffusion_policy.model.common.normalizer import (
     SingleFieldLinearNormalizer,
 )
 from diffusion_policy.dataset.base_dataset import BaseLowdimDataset
+from torch.utils.data._utils.collate import default_collate
+
+
+class UAVCombatBatchCollator:
+    enemy0_pos_slice = slice(21, 24)
+
+    @classmethod
+    def compute_action_from_obs(cls, obs: torch.Tensor) -> torch.Tensor:
+        enemy0_pos = obs[..., cls.enemy0_pos_slice]
+        action = torch.zeros_like(enemy0_pos)
+        action[..., 1:, :] = enemy0_pos[..., 1:, :] - enemy0_pos[..., :-1, :]
+        return action
+
+    def __call__(self, batch):
+        collated = default_collate(batch)
+        collated["action"] = self.compute_action_from_obs(collated["obs"])
+        return collated
 
 class UAVCombatLowdimDataset(BaseLowdimDataset):
+    enemy0_pos_slice = slice(21, 24)
+
     def __init__(self, 
             zarr_path, 
             horizon=1,
             pad_before=0,
             pad_after=0,
             obs_key='uav_observations', # 形状预期: (N, 6, 7)
-            action_key='uav_actions',    # 形状预期: (N, 3) 敌机相对位移
             seed=42,
             val_ratio=0.0,
             max_train_episodes=None
@@ -30,7 +48,7 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
         super().__init__()
         self.zarr_path = os.path.expanduser(zarr_path)
         self.replay_buffer = ReplayBuffer.copy_from_path(
-            zarr_path, keys=[obs_key, action_key])
+            zarr_path, keys=[obs_key])
         zroot = zarr.open(self.zarr_path, "r")
         self.delta_max_abs = zroot.attrs.get("delta_max_abs", None)
         self.meters_per_unit = float(zroot.attrs.get("meters_per_unit", 1.0))
@@ -54,11 +72,28 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
             )
         
         self.obs_key = obs_key
-        self.action_key = action_key
         self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
+
+    @classmethod
+    def _compute_action_from_obs_np(cls, obs: np.ndarray, episode_ends=None) -> np.ndarray:
+        enemy0_pos = obs[..., cls.enemy0_pos_slice]
+        action = np.zeros_like(enemy0_pos, dtype=np.float32)
+        if episode_ends is None:
+            action[..., 1:, :] = enemy0_pos[..., 1:, :] - enemy0_pos[..., :-1, :]
+            return action
+
+        start = 0
+        for end in np.asarray(episode_ends, dtype=np.int64).tolist():
+            if end - start > 1:
+                action[start + 1:end, :] = enemy0_pos[start + 1:end, :] - enemy0_pos[start:end - 1, :]
+            start = end
+        return action
+
+    def get_collate_fn(self):
+        return UAVCombatBatchCollator()
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -73,7 +108,15 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
         return val_set
 
     def get_normalizer(self, mode='limits', **kwargs):
-        data = self._sample_to_data(self.replay_buffer)
+        obs = self._sample_to_obs(self.replay_buffer)
+        action = self._compute_action_from_obs_np(
+            obs,
+            episode_ends=self.replay_buffer.episode_ends[:]
+        )
+        data = {
+            "obs": obs,
+            "action": action,
+        }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         if self.delta_max_abs is not None:
@@ -93,27 +136,26 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
         return normalizer
 
     def get_all_actions(self) -> torch.Tensor:
-        return torch.from_numpy(self.replay_buffer[self.action_key])
+        obs = self._sample_to_obs(self.replay_buffer)
+        action = self._compute_action_from_obs_np(
+            obs,
+            episode_ends=self.replay_buffer.episode_ends[:]
+        )
+        return torch.from_numpy(action)
 
     def __len__(self) -> int:
         return len(self.sampler)
 
-    def _sample_to_data(self, sample):
+    def _sample_to_obs(self, sample):
         obs_raw = sample[self.obs_key]
         obs = obs_raw.reshape(obs_raw.shape[0], -1)
-
-        action_raw = sample[self.action_key]
-        action = action_raw.reshape(action_raw.shape[0], -1)
-
-        data = {
-            'obs': obs,        # 形状: (T, 42)
-            'action': action,  # 形状: (T, 3)
-        }
-        return data
+        return obs
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(idx)
-        data = self._sample_to_data(sample)
+        data = {
+            'obs': self._sample_to_obs(sample),  # 形状: (T, 42)
+        }
 
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data

@@ -79,12 +79,20 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
         dataset: BaseLowdimDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseLowdimDataset)
-        train_dataloader = DataLoader(dataset, **cfg.dataloader)
+        train_dataloader = DataLoader(
+            dataset,
+            collate_fn=dataset.get_collate_fn(),
+            **cfg.dataloader,
+        )
         normalizer = dataset.get_normalizer()
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+        val_dataloader = DataLoader(
+            val_dataset,
+            collate_fn=val_dataset.get_collate_fn(),
+            **cfg.val_dataloader,
+        )
 
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -163,7 +171,36 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
         val_epoch_history = []
         eval_ade_history = []
         eval_fde_history = []
+        eval_ratio_pct_history = []
         eval_epoch_history = []
+
+        def annotate_best_point(ax, x_vals, y_vals, label, color, offset):
+            if len(x_vals) == 0 or len(y_vals) == 0:
+                return
+
+            x = np.asarray(x_vals, dtype=np.float32)
+            y = np.asarray(y_vals, dtype=np.float32)
+            valid = np.isfinite(x) & np.isfinite(y)
+            if not np.any(valid):
+                return
+
+            x = x[valid]
+            y = y[valid]
+            best_idx = int(np.argmin(y))
+            best_x = float(x[best_idx])
+            best_y = float(y[best_idx])
+
+            ax.scatter([best_x], [best_y], color=color, s=36, zorder=5)
+            ax.annotate(
+                f"best {label}: {best_y:.3f}\n(epoch {int(round(best_x))})",
+                xy=(best_x, best_y),
+                xytext=offset,
+                textcoords="offset points",
+                fontsize=8,
+                color=color,
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=color, alpha=0.85),
+                arrowprops=dict(arrowstyle="->", color=color, lw=0.8),
+            )
 
         def save_loss_plot():
             if len(train_loss_history) == 0:
@@ -183,18 +220,48 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
         def save_traj_error_plot():
             if len(eval_epoch_history) == 0:
                 return
+
             fig, ax = plt.subplots(figsize=(6, 4))
             if len(eval_ade_history) > 0:
-                ax.plot(eval_epoch_history, eval_ade_history, label='ADE (m)')
+                ade_line, = ax.plot(eval_epoch_history, eval_ade_history, label='ADE (m)')
+                annotate_best_point(
+                    ax, eval_epoch_history, eval_ade_history,
+                    label='ADE', color=ade_line.get_color(), offset=(8, -18)
+                )
             if len(eval_fde_history) > 0:
-                ax.plot(eval_epoch_history, eval_fde_history, label='FDE (m)')
+                fde_line, = ax.plot(eval_epoch_history, eval_fde_history, label='FDE (m)')
+                annotate_best_point(
+                    ax, eval_epoch_history, eval_fde_history,
+                    label='FDE', color=fde_line.get_color(), offset=(8, 10)
+                )
             ax.set_xlabel('epoch')
             ax.set_ylabel('error (m)')
-            ax.legend()
             ax.grid(True, alpha=0.3)
+            ax.legend()
             fig.tight_layout()
             fig.savefig(os.path.join(plot_dir, 'traj_error_curve.png'), dpi=150)
             plt.close(fig)
+
+            if len(eval_ratio_pct_history) > 0:
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ratio_line, = ax.plot(
+                    eval_epoch_history,
+                    eval_ratio_pct_history,
+                    color='tab:green',
+                    linestyle='--',
+                    label='SumErr/Len (%)'
+                )
+                annotate_best_point(
+                    ax, eval_epoch_history, eval_ratio_pct_history,
+                    label='ratio', color=ratio_line.get_color(), offset=(8, 10)
+                )
+                ax.set_xlabel('epoch')
+                ax.set_ylabel('ratio (%)')
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+                fig.tight_layout()
+                fig.savefig(os.path.join(plot_dir, 'traj_error_ratio_curve.png'), dpi=150)
+                plt.close(fig)
 
         train_start_time = time.time()
         with tqdm.tqdm(
@@ -272,12 +339,15 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     step_log.update(runner_log)
                     ade = runner_log.get('eval_traj_ade_m', None)
                     fde = runner_log.get('eval_traj_fde_m', None)
+                    ratio_pct = runner_log.get('eval_traj_ade_ratio_pct', None)
                     has_ade = (ade is not None) and np.isfinite(ade)
                     has_fde = (fde is not None) and np.isfinite(fde)
-                    if has_ade or has_fde:
+                    has_ratio = (ratio_pct is not None) and np.isfinite(ratio_pct)
+                    if has_ade or has_fde or has_ratio:
                         eval_epoch_history.append(len(train_loss_history)-1)
                         eval_ade_history.append(float(ade) if has_ade else np.nan)
                         eval_fde_history.append(float(fde) if has_fde else np.nan)
+                        eval_ratio_pct_history.append(float(ratio_pct) if has_ratio else np.nan)
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
@@ -310,8 +380,7 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                         result = policy.predict_action(obs_dict)
                         if cfg.pred_action_steps_only:
                             pred_action = result['action']
-                            start = cfg.n_obs_steps - 1
-                            end = start + cfg.n_action_steps
+                            start, end = policy.get_action_window_indices()
                             gt_action = gt_action[:,start:end]
                         else:
                             pred_action = result['action_pred']
@@ -367,6 +436,8 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     postfix['val_loss'] = f"{step_log['val_loss']:.4f}"
                 if 'eval_traj_ade_m' in step_log:
                     postfix['ade_m'] = f"{step_log['eval_traj_ade_m']:.2f}"
+                if 'eval_traj_ade_ratio_pct' in step_log:
+                    postfix['err_pct'] = f"{step_log['eval_traj_ade_ratio_pct']:.1f}%"
                 epoch_pbar.set_postfix(postfix, refresh=False)
                 epoch_pbar.update(1)
 

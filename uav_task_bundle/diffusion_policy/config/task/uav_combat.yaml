@@ -25,8 +25,8 @@ dataset:
   _target_: diffusion_policy.dataset.uav_combat_lowdim_dataset.UAVCombatLowdimDataset
   zarr_path: ${hydra:runtime.cwd}/data/uav_combat/test_data_mode_switch.zarr
   horizon: ${horizon}
-  # 这里的计算公式要保留，它是 Diffusion Policy 采样逻辑的核心
-  pad_before: ${eval:'${n_obs_steps}-1+${n_latency_steps}'}
-  pad_after: ${eval:'${n_action_steps}-1'}
+  # 只采真实窗口，不对序列头尾做重复填充
+  pad_before: 0
+  pad_after: 0
   seed: 42
   val_ratio: 0.1

@@ -270,7 +270,9 @@ class TransformerForDiffusion(ModuleAttrMixin):
     def forward(self, 
         sample: torch.Tensor, 
         timestep: Union[torch.Tensor, float, int], 
-        cond: Optional[torch.Tensor]=None, **kwargs):
+        cond: Optional[torch.Tensor]=None,
+        token_offset: int=0,
+        **kwargs):
         """
         x: (B,T,input_dim)
         timestep: (B,) or int, diffusion step
@@ -301,7 +303,10 @@ class TransformerForDiffusion(ModuleAttrMixin):
             ]  # each position maps to a (learnable) vector
             x = self.drop(token_embeddings + position_embeddings)
             # (B,T+1,n_emb)
-            x = self.encoder(src=x, mask=self.mask)
+            mask = None
+            if self.mask is not None:
+                mask = self.mask[:t, :t]
+            x = self.encoder(src=x, mask=mask)
             # (B,T+1,n_emb)
             x = x[:,1:,:]
             # (B,T,n_emb)
@@ -324,16 +329,28 @@ class TransformerForDiffusion(ModuleAttrMixin):
             # decoder
             token_embeddings = input_emb
             t = token_embeddings.shape[1]
+            pos_start = int(token_offset)
+            pos_end = pos_start + t
+            if pos_end > self.pos_emb.shape[1]:
+                raise ValueError(
+                    f"token_offset={token_offset} with sequence length {t} exceeds decoder horizon {self.pos_emb.shape[1]}"
+                )
             position_embeddings = self.pos_emb[
-                :, :t, :
+                :, pos_start:pos_end, :
             ]  # each position maps to a (learnable) vector
             x = self.drop(token_embeddings + position_embeddings)
             # (B,T,n_emb)
+            tgt_mask = None
+            if self.mask is not None:
+                tgt_mask = self.mask[pos_start:pos_end, pos_start:pos_end]
+            memory_mask = None
+            if self.memory_mask is not None:
+                memory_mask = self.memory_mask[pos_start:pos_end, :tc]
             x = self.decoder(
                 tgt=x,
                 memory=memory,
-                tgt_mask=self.mask,
-                memory_mask=self.memory_mask
+                tgt_mask=tgt_mask,
+                memory_mask=memory_mask
             )
             # (B,T,n_emb)
         
@@ -415,4 +432,3 @@ def test():
     timestep = torch.tensor(0)
     sample = torch.zeros((4,8,16))
     out = transformer(sample, timestep)
-
