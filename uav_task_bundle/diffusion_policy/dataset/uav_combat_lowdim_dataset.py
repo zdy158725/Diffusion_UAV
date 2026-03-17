@@ -17,13 +17,13 @@ from torch.utils.data._utils.collate import default_collate
 
 
 class UAVCombatBatchCollator:
-    enemy0_pos_slice = slice(21, 24)
+    def __init__(self, position_slice=slice(0, 3)):
+        self.position_slice = position_slice
 
-    @classmethod
-    def compute_action_from_obs(cls, obs: torch.Tensor) -> torch.Tensor:
-        enemy0_pos = obs[..., cls.enemy0_pos_slice]
-        action = torch.zeros_like(enemy0_pos)
-        action[..., 1:, :] = enemy0_pos[..., 1:, :] - enemy0_pos[..., :-1, :]
+    def compute_action_from_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        pos = obs[..., self.position_slice]
+        action = torch.zeros_like(pos)
+        action[..., 1:, :] = pos[..., 1:, :] - pos[..., :-1, :]
         return action
 
     def __call__(self, batch):
@@ -31,15 +31,15 @@ class UAVCombatBatchCollator:
         collated["action"] = self.compute_action_from_obs(collated["obs"])
         return collated
 
-class UAVCombatLowdimDataset(BaseLowdimDataset):
-    enemy0_pos_slice = slice(21, 24)
 
-    def __init__(self, 
-            zarr_path, 
+class UAVCombatLowdimDataset(BaseLowdimDataset):
+    def __init__(self,
+            zarr_path,
             horizon=1,
             pad_before=0,
             pad_after=0,
-            obs_key='uav_observations', # 形状预期: (N, 6, 7)
+            obs_key='uav_observations',
+            obs_slice=(21, 27),
             seed=42,
             val_ratio=0.0,
             max_train_episodes=None
@@ -54,53 +54,58 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
         self.meters_per_unit = float(zroot.attrs.get("meters_per_unit", 1.0))
 
         val_mask = get_val_mask(
-            n_episodes=self.replay_buffer.n_episodes, 
+            n_episodes=self.replay_buffer.n_episodes,
             val_ratio=val_ratio,
             seed=seed)
         train_mask = ~val_mask
         train_mask = downsample_mask(
-            mask=train_mask, 
-            max_n=max_train_episodes, 
+            mask=train_mask,
+            max_n=max_train_episodes,
             seed=seed)
 
         self.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer, 
+            replay_buffer=self.replay_buffer,
             sequence_length=horizon,
-            pad_before=pad_before, 
+            pad_before=pad_before,
             pad_after=pad_after,
             episode_mask=train_mask
             )
-        
+
+        obs_slice = tuple(obs_slice)
+        if len(obs_slice) != 2:
+            raise ValueError(f"obs_slice should have length 2, got {obs_slice}")
+        self.obs_slice = slice(int(obs_slice[0]), int(obs_slice[1]))
+        self.position_slice = slice(0, 3)
+
         self.obs_key = obs_key
         self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
 
-    @classmethod
-    def _compute_action_from_obs_np(cls, obs: np.ndarray, episode_ends=None) -> np.ndarray:
-        enemy0_pos = obs[..., cls.enemy0_pos_slice]
-        action = np.zeros_like(enemy0_pos, dtype=np.float32)
+    def _compute_action_from_obs_np(self, obs: np.ndarray, episode_ends=None) -> np.ndarray:
+        pos = obs[..., self.position_slice]
+        action = np.zeros_like(pos, dtype=np.float32)
         if episode_ends is None:
-            action[..., 1:, :] = enemy0_pos[..., 1:, :] - enemy0_pos[..., :-1, :]
+            action[..., 1:, :] = pos[..., 1:, :] - pos[..., :-1, :]
             return action
 
         start = 0
         for end in np.asarray(episode_ends, dtype=np.int64).tolist():
             if end - start > 1:
-                action[start + 1:end, :] = enemy0_pos[start + 1:end, :] - enemy0_pos[start:end - 1, :]
+                action[start + 1:end, :] = pos[start + 1:end, :] - pos[start:end - 1, :]
             start = end
         return action
 
     def get_collate_fn(self):
-        return UAVCombatBatchCollator()
+        return UAVCombatBatchCollator(position_slice=self.position_slice)
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer, 
+            replay_buffer=self.replay_buffer,
             sequence_length=self.horizon,
-            pad_before=self.pad_before, 
+            pad_before=self.pad_before,
             pad_after=self.pad_after,
             episode_mask=~self.train_mask
             )
@@ -149,12 +154,12 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
     def _sample_to_obs(self, sample):
         obs_raw = sample[self.obs_key]
         obs = obs_raw.reshape(obs_raw.shape[0], -1)
-        return obs
+        return obs[..., self.obs_slice]
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(idx)
         data = {
-            'obs': self._sample_to_obs(sample),  # 形状: (T, 42)
+            'obs': self._sample_to_obs(sample),
         }
 
         torch_data = dict_apply(data, torch.from_numpy)

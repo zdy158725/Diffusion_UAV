@@ -38,6 +38,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         plot_interval=1,
         plot_num_samples=2,
         plot_action=True,
+        plot_trajectory3d=True,
         plot_curves=True,
         curve_log_path="logs.json.txt",
         curve_keys=None,
@@ -65,9 +66,11 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         self.plot_interval = max(int(plot_interval), 1)
         self.plot_num_samples = max(int(plot_num_samples), 1)
         self.plot_action = plot_action
+        self.plot_trajectory3d = plot_trajectory3d
         self.plot_curves = plot_curves
         self.curve_log_path = curve_log_path
         self.action_scale_to_meter = float(getattr(self.dataset, "meters_per_unit", 1.0))
+        self.position_slice = getattr(self.dataset, "position_slice", slice(0, 3))
         self.curve_keys = curve_keys or [
             "eval_traj_ade_m",
             "eval_traj_fde_m",
@@ -108,8 +111,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 # For plotting, always show execution window only.
                 plot_pred_action = result["action"]
                 plot_gt_action = batch["action"][:, start:end]
-                # enemy0 position in obs: own(3*7=21 dims) then enemy0 xyz
-                plot_start_pos = batch["obs"][:, anchor_idx, 21:24]
+                plot_start_pos = batch["obs"][:, anchor_idx, self.position_slice]
 
                 pred_action_m = pred_action * self.action_scale_to_meter
                 gt_action_m = gt_action * self.action_scale_to_meter
@@ -135,13 +137,13 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 ade_vals.append(ade.item())
                 fde_vals.append(fde.item())
                 ade_ratio_pct_vals.append(ade_ratio_pct.item())
-                if self.save_plots and self.plot_action and (plot_data is None):
+                if self.save_plots and (self.plot_action or self.plot_trajectory3d) and (plot_data is None):
                     plot_data = {
                         "pred": plot_pred_m[: self.plot_num_samples].detach().cpu().numpy(),
                         "gt": plot_gt_m[: self.plot_num_samples].detach().cpu().numpy(),
                         "start_pos": plot_start_pos_m[: self.plot_num_samples].detach().cpu().numpy(),
                         "obs_pos_full": (
-                            batch["obs"][: self.plot_num_samples, :, 21:24]
+                            batch["obs"][: self.plot_num_samples, :, self.position_slice]
                             * self.action_scale_to_meter
                         ).detach().cpu().numpy(),
                         "n_obs_steps": int(policy.n_obs_steps),
@@ -178,8 +180,11 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
 
         if self.save_plots and (self.eval_count % self.plot_interval == 0):
             os.makedirs(self.plot_dir, exist_ok=True)
-            if self.plot_action and (plot_data is not None):
-                self._save_action_plot(plot_data)
+            if plot_data is not None:
+                if self.plot_action:
+                    self._save_action_plot(plot_data)
+                if self.plot_trajectory3d:
+                    self._save_trajectory3d_plots(plot_data)
             if self.plot_curves:
                 self._save_curve_plot()
 
@@ -314,14 +319,6 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             fig.savefig(out_path, dpi=150)
             plt.close(fig)
 
-            if dims == 3:
-                self._save_trajectory3d_plot(
-                    history_xyz=history,
-                    gt_future_xyz=future_gt,
-                    pred_future_xyz=pred_future,
-                    sample_idx=s,
-                )
-
         # save raw arrays for inspection
         np.savez_compressed(
             os.path.join(self.plot_dir, f"action_pred_eval{self.eval_count:04d}.npz"),
@@ -330,6 +327,41 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             start_pos=start_pos,
             obs_pos_full=obs_pos_full,
         )
+
+    def _save_trajectory3d_plots(self, plot_data):
+        if plt is None:
+            return
+        pred = plot_data["pred"]
+        gt = plot_data["gt"]
+        start_pos = plot_data["start_pos"]
+        obs_pos_full = plot_data.get("obs_pos_full", None)
+        n_obs_steps = int(plot_data.get("n_obs_steps", 1))
+        if pred.ndim != 3 or gt.ndim != 3 or pred.shape[2] != 3:
+            return
+
+        n_samples = pred.shape[0]
+        for s in range(n_samples):
+            if obs_pos_full is not None:
+                history = obs_pos_full[s, :n_obs_steps]
+            else:
+                history = start_pos[s : s + 1]
+            if history.shape[-1] != 3:
+                continue
+
+            future_gt = None
+            if obs_pos_full is not None:
+                future_end = min(n_obs_steps + pred.shape[1], obs_pos_full.shape[1])
+                future_gt = obs_pos_full[s, n_obs_steps:future_end]
+            pred_future = history[-1:] + np.cumsum(pred[s], axis=0)
+            if future_gt is None or future_gt.shape[0] != pred.shape[1]:
+                future_gt = history[-1:] + np.cumsum(gt[s], axis=0)
+
+            self._save_trajectory3d_plot(
+                history_xyz=history,
+                gt_future_xyz=future_gt,
+                pred_future_xyz=pred_future,
+                sample_idx=s,
+            )
 
     def _save_trajectory3d_plot(self, history_xyz, gt_future_xyz, pred_future_xyz, sample_idx):
         history_plot = np.asarray(history_xyz, dtype=np.float32)

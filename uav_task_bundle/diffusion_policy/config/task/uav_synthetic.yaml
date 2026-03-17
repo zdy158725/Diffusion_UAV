@@ -1,10 +1,8 @@
-name: uav_combat
+name: uav_synthetic
 
 obs_dim: 6
 action_dim: 3
 
-# 因为你目前没有 UAV 的仿真环境，不能直接用 PushTKeypointsRunner
-# 我们先用一个最基础的 Runner，或者如果你之前改了代码支持 null，就写 null
 env_runner:
   _target_: diffusion_policy.env_runner.uav_combat_offline_runner.UAVCombatOfflineRunner
   dataset: ${..dataset}
@@ -23,10 +21,9 @@ env_runner:
 
 dataset:
   _target_: diffusion_policy.dataset.uav_combat_lowdim_dataset.UAVCombatLowdimDataset
-  zarr_path: ${hydra:runtime.cwd}/data/uav_combat/test_data_mode_switch.zarr
-  obs_slice: [21, 27]
+  zarr_path: ${hydra:runtime.cwd}/data/uav_synthetic/uav_synthetic_5k.zarr
+  obs_slice: [0, 6]
   horizon: ${horizon}
-  # 只采真实窗口，不对序列头尾做重复填充
   pad_before: 0
   pad_after: 0
   seed: 42

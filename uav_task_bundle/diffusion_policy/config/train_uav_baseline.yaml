@@ -1,0 +1,84 @@
+defaults:
+  - _self_
+  - task: uav_combat
+
+name: train_uav_mlp_baseline
+task_name: ${task.name}
+
+_target_: diffusion_policy.workspace.train_diffusion_transformer_lowdim_workspace.TrainDiffusionTransformerLowdimWorkspace
+
+horizon: 15
+n_obs_steps: 12
+n_action_steps: 3
+n_latency_steps: 0
+pred_action_steps_only: True
+
+policy:
+  _target_: diffusion_policy.policy.mlp_regression_lowdim_policy.MLPRegressionLowdimPolicy
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  obs_dim: ${task.obs_dim}
+  action_dim: ${task.action_dim}
+  obs_as_cond: True
+  pred_action_steps_only: ${pred_action_steps_only}
+  hidden_dims: [512, 256]
+  dropout: 0.1
+
+training:
+  device: "cuda:0"
+  seed: 32
+  debug: False
+  resume: False
+  num_epochs: 150
+  gradient_accumulate_steps: 1
+  lr: 1.0e-3
+  lr_scheduler: cosine
+  lr_warmup_steps: 200
+  weight_decay: 1.0e-4
+  checkpoint_every: 50
+  gradient_accumulate_every: 1
+  use_ema: False
+  rollout_every: 1
+  val_every: 1
+  sample_every: 5
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  learning_rate: ${training.lr}
+  weight_decay: ${training.weight_decay}
+  betas: [0.9, 0.95]
+
+logging:
+  project: diffusion_policy_debug
+  resume: True
+  mode: disabled
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "baseline"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: test_mean_score
+    mode: max
+    k: 5
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 4
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
