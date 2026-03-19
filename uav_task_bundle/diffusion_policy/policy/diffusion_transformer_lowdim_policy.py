@@ -28,6 +28,7 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             short_horizon_focus_gain: float=3.0,
             terminal_pos_loss_weight: float=0.0,
             terminal_pos_loss_power: float=1.0,
+            relative_path_loss_weight: float=0.0,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -57,6 +58,7 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         self.short_horizon_focus_gain = float(short_horizon_focus_gain)
         self.terminal_pos_loss_weight = float(terminal_pos_loss_weight)
         self.terminal_pos_loss_power = float(terminal_pos_loss_power)
+        self.relative_path_loss_weight = float(relative_path_loss_weight)
         self.kwargs = kwargs
 
         if num_inference_steps is None:
@@ -268,6 +270,20 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         total_loss = loss.mean()
 
+        def get_eval_action_tensors(pred_tensor, target_tensor, mask_tensor=None):
+            if self.pred_action_steps_only:
+                return pred_tensor, target_tensor, mask_tensor
+
+            T = target_tensor.shape[1]
+            start = min(max(self.n_obs_steps, 0), T - 1)
+            end = min(start + self.n_action_steps, T)
+            focus_pred = pred_tensor[:, start:end, :]
+            focus_target = target_tensor[:, start:end, :]
+            focus_mask = None
+            if mask_tensor is not None:
+                focus_mask = mask_tensor[:, start:end, :]
+            return focus_pred, focus_target, focus_mask
+
         if self.short_horizon_loss_weight > 0.0 and trajectory.shape[1] > 0:
             T = trajectory.shape[1]
             if self.pred_action_steps_only:
@@ -303,17 +319,9 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             total_loss = total_loss + self.velocity_loss_weight * vel_loss
 
         if self.terminal_pos_loss_weight > 0.0 and trajectory.shape[1] > 0:
-            if self.pred_action_steps_only:
-                focus_pred = x0_pred
-                focus_target = trajectory
-                focus_mask = loss_mask
-            else:
-                T = trajectory.shape[1]
-                start = min(max(self.n_obs_steps, 0), T - 1)
-                end = min(start + self.n_action_steps, T)
-                focus_pred = x0_pred[:, start:end, :]
-                focus_target = trajectory[:, start:end, :]
-                focus_mask = loss_mask[:, start:end, :]
+            focus_pred, focus_target, focus_mask = get_eval_action_tensors(
+                x0_pred, trajectory, loss_mask
+            )
 
             if focus_pred.shape[1] > 0:
                 pred_pos = torch.cumsum(focus_pred, dim=1)
@@ -327,5 +335,18 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
                         terminal_pos_loss + 1e-8, self.terminal_pos_loss_power
                     )
                 total_loss = total_loss + self.terminal_pos_loss_weight * terminal_pos_loss
+
+        if self.relative_path_loss_weight > 0.0 and trajectory.shape[1] > 0:
+            focus_pred, focus_target, _ = get_eval_action_tensors(x0_pred, trajectory)
+            if focus_pred.shape[1] > 0:
+                # Compute the trajectory ratio in physical action space so it matches eval semantics.
+                pred_action = self.normalizer['action'].unnormalize(focus_pred)
+                target_action = self.normalizer['action'].unnormalize(focus_target)
+                pred_pos = torch.cumsum(pred_action, dim=1)
+                target_pos = torch.cumsum(target_action, dim=1)
+                step_err = torch.linalg.norm(pred_pos - target_pos, dim=-1)
+                gt_path_len = torch.linalg.norm(target_action, dim=-1).sum(dim=1).clamp(min=1e-6)
+                relative_path_loss = (step_err.sum(dim=1) / gt_path_len).mean()
+                total_loss = total_loss + self.relative_path_loss_weight * relative_path_loss
 
         return total_loss

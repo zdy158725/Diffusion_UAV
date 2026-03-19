@@ -172,7 +172,14 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
         eval_ade_history = []
         eval_fde_history = []
         eval_ratio_pct_history = []
+        eval_top1_subset_ade_history = []
+        eval_top1_subset_fde_history = []
+        eval_top1_subset_ratio_pct_history = []
+        eval_best_of_n_ade_history = []
+        eval_best_of_n_fde_history = []
+        eval_best_of_n_ratio_pct_history = []
         eval_epoch_history = []
+        best_of_n_label = 'Best-of-N'
 
         def annotate_best_point(ax, x_vals, y_vals, label, color, offset):
             if len(x_vals) == 0 or len(y_vals) == 0:
@@ -228,11 +235,37 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     ax, eval_epoch_history, eval_ade_history,
                     label='ADE', color=ade_line.get_color(), offset=(8, -18)
                 )
+            if len(eval_best_of_n_ade_history) > 0:
+                best_ade_line, = ax.plot(
+                    eval_epoch_history,
+                    eval_best_of_n_ade_history,
+                    linestyle='--',
+                    label=f'{best_of_n_label} ADE (m, subset)'
+                )
+                annotate_best_point(
+                    ax, eval_epoch_history, eval_best_of_n_ade_history,
+                    label=f'{best_of_n_label} ADE',
+                    color=best_ade_line.get_color(),
+                    offset=(8, 12)
+                )
             if len(eval_fde_history) > 0:
                 fde_line, = ax.plot(eval_epoch_history, eval_fde_history, label='FDE (m)')
                 annotate_best_point(
                     ax, eval_epoch_history, eval_fde_history,
                     label='FDE', color=fde_line.get_color(), offset=(8, 10)
+                )
+            if len(eval_best_of_n_fde_history) > 0:
+                best_fde_line, = ax.plot(
+                    eval_epoch_history,
+                    eval_best_of_n_fde_history,
+                    linestyle='--',
+                    label=f'{best_of_n_label} FDE (m, subset)'
+                )
+                annotate_best_point(
+                    ax, eval_epoch_history, eval_best_of_n_fde_history,
+                    label=f'{best_of_n_label} FDE',
+                    color=best_fde_line.get_color(),
+                    offset=(8, -22)
                 )
             ax.set_xlabel('epoch')
             ax.set_ylabel('error (m)')
@@ -248,13 +281,34 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     eval_epoch_history,
                     eval_ratio_pct_history,
                     color='tab:green',
-                    linestyle='--',
-                    label='SumErr/Len (%)'
+                    label='Top-1 path err (%)'
                 )
                 annotate_best_point(
                     ax, eval_epoch_history, eval_ratio_pct_history,
-                    label='ratio', color=ratio_line.get_color(), offset=(8, 10)
+                    label='top1', color=ratio_line.get_color(), offset=(8, 10)
                 )
+                if len(eval_top1_subset_ratio_pct_history) > 0:
+                    ax.plot(
+                        eval_epoch_history,
+                        eval_top1_subset_ratio_pct_history,
+                        color='0.5',
+                        linestyle=':',
+                        label='Top-1 subset path err (%)'
+                    )
+                if len(eval_best_of_n_ratio_pct_history) > 0:
+                    best_ratio_line, = ax.plot(
+                        eval_epoch_history,
+                        eval_best_of_n_ratio_pct_history,
+                        color='tab:red',
+                        linestyle='--',
+                        label=f'{best_of_n_label} subset path err (%)'
+                    )
+                    annotate_best_point(
+                        ax, eval_epoch_history, eval_best_of_n_ratio_pct_history,
+                        label=best_of_n_label.lower(),
+                        color=best_ratio_line.get_color(),
+                        offset=(8, -22)
+                    )
                 ax.set_xlabel('epoch')
                 ax.set_ylabel('ratio (%)')
                 ax.grid(True, alpha=0.3)
@@ -337,9 +391,21 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
+                    best_of_n_samples = runner_log.get('eval_best_of_n_samples', None)
+                    if best_of_n_samples is not None and np.isfinite(best_of_n_samples):
+                        best_of_n_label = f"Best-of-{int(best_of_n_samples)}"
                     ade = runner_log.get('eval_traj_ade_m', None)
                     fde = runner_log.get('eval_traj_fde_m', None)
-                    ratio_pct = runner_log.get('eval_traj_ade_ratio_pct', None)
+                    ratio_pct = runner_log.get(
+                        'eval_traj_path_error_pct',
+                        runner_log.get('eval_traj_ade_ratio_pct', None)
+                    )
+                    top1_subset_ade = runner_log.get('eval_top1_subset_traj_ade_m', None)
+                    top1_subset_fde = runner_log.get('eval_top1_subset_traj_fde_m', None)
+                    top1_subset_ratio_pct = runner_log.get('eval_top1_subset_traj_path_error_pct', None)
+                    best_of_n_ade = runner_log.get('eval_best_of_n_traj_ade_m', None)
+                    best_of_n_fde = runner_log.get('eval_best_of_n_traj_fde_m', None)
+                    best_of_n_ratio_pct = runner_log.get('eval_best_of_n_traj_path_error_pct', None)
                     has_ade = (ade is not None) and np.isfinite(ade)
                     has_fde = (fde is not None) and np.isfinite(fde)
                     has_ratio = (ratio_pct is not None) and np.isfinite(ratio_pct)
@@ -348,6 +414,36 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                         eval_ade_history.append(float(ade) if has_ade else np.nan)
                         eval_fde_history.append(float(fde) if has_fde else np.nan)
                         eval_ratio_pct_history.append(float(ratio_pct) if has_ratio else np.nan)
+                        eval_top1_subset_ade_history.append(
+                            float(top1_subset_ade)
+                            if (top1_subset_ade is not None) and np.isfinite(top1_subset_ade)
+                            else np.nan
+                        )
+                        eval_top1_subset_fde_history.append(
+                            float(top1_subset_fde)
+                            if (top1_subset_fde is not None) and np.isfinite(top1_subset_fde)
+                            else np.nan
+                        )
+                        eval_top1_subset_ratio_pct_history.append(
+                            float(top1_subset_ratio_pct)
+                            if (top1_subset_ratio_pct is not None) and np.isfinite(top1_subset_ratio_pct)
+                            else np.nan
+                        )
+                        eval_best_of_n_ade_history.append(
+                            float(best_of_n_ade)
+                            if (best_of_n_ade is not None) and np.isfinite(best_of_n_ade)
+                            else np.nan
+                        )
+                        eval_best_of_n_fde_history.append(
+                            float(best_of_n_fde)
+                            if (best_of_n_fde is not None) and np.isfinite(best_of_n_fde)
+                            else np.nan
+                        )
+                        eval_best_of_n_ratio_pct_history.append(
+                            float(best_of_n_ratio_pct)
+                            if (best_of_n_ratio_pct is not None) and np.isfinite(best_of_n_ratio_pct)
+                            else np.nan
+                        )
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
@@ -436,8 +532,12 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     postfix['val_loss'] = f"{step_log['val_loss']:.4f}"
                 if 'eval_traj_ade_m' in step_log:
                     postfix['ade_m'] = f"{step_log['eval_traj_ade_m']:.2f}"
-                if 'eval_traj_ade_ratio_pct' in step_log:
-                    postfix['err_pct'] = f"{step_log['eval_traj_ade_ratio_pct']:.1f}%"
+                path_err_pct = step_log.get(
+                    'eval_traj_path_error_pct',
+                    step_log.get('eval_traj_ade_ratio_pct')
+                )
+                if path_err_pct is not None:
+                    postfix['path_err_pct'] = f"{path_err_pct:.1f}%"
                 epoch_pbar.set_postfix(postfix, refresh=False)
                 epoch_pbar.update(1)
 

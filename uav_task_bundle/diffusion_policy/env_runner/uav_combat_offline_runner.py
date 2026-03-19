@@ -43,6 +43,8 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         curve_log_path="logs.json.txt",
         curve_keys=None,
         curve_show_test_mse=True,
+        multi_sample_eval_samples=1,
+        multi_sample_eval_max_batches=None,
     ):
         super().__init__(output_dir)
         # instantiate dataset from config if needed
@@ -74,7 +76,13 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         self.curve_keys = curve_keys or [
             "eval_traj_ade_m",
             "eval_traj_fde_m",
-            "eval_traj_ade_ratio_pct",
+            "eval_traj_path_error_pct",
+            "eval_top1_subset_traj_path_error_pct",
+            "eval_best_of_n_traj_ade_m",
+            "eval_best_of_n_traj_fde_m",
+            "eval_best_of_n_traj_path_error_pct",
+            "eval_best_of_n_gain_traj_path_error_pct",
+            "eval_traj_fde_ratio_pct",
             "eval_action_mse",
             "eval_action_mae",
             "val_loss",
@@ -82,7 +90,48 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             "test/mean_score",
         ]
         self.curve_show_test_mse = curve_show_test_mse
+        self.multi_sample_eval_samples = max(int(multi_sample_eval_samples), 1)
+        self.multi_sample_eval_max_batches = (
+            None if multi_sample_eval_max_batches is None
+            else max(int(multi_sample_eval_max_batches), 1)
+        )
         self.eval_count = 0
+
+    def _compute_path_stats(self, pred_action_m, gt_action_m, start_pos_m):
+        pred_xyz = start_pos_m[:, None, :] + torch.cumsum(pred_action_m, dim=1)
+        gt_xyz = start_pos_m[:, None, :] + torch.cumsum(gt_action_m, dim=1)
+        dist = torch.linalg.norm(pred_xyz - gt_xyz, dim=-1)
+        gt_path_len = torch.linalg.norm(gt_action_m, dim=-1).sum(dim=1).clamp(min=1e-6)
+        return dist, gt_path_len
+
+    def _reduce_metrics(self, pred_action_m, gt_action_m, dist, gt_path_len):
+        mse = torch.nn.functional.mse_loss(pred_action_m, gt_action_m)
+        mae = torch.nn.functional.l1_loss(pred_action_m, gt_action_m)
+        ade = dist.mean()
+        fde = dist[:, -1].mean()
+        path_error_pct = (dist.sum(dim=1) / gt_path_len * 100.0).mean()
+        fde_ratio_pct = (dist[:, -1] / gt_path_len * 100.0).mean()
+        return {
+            "action_mse": mse.item(),
+            "action_mae": mae.item(),
+            "traj_ade_m": ade.item(),
+            "traj_fde_m": fde.item(),
+            "traj_path_error_pct": path_error_pct.item(),
+            "traj_fde_ratio_pct": fde_ratio_pct.item(),
+        }
+
+    def _select_best_of_n(self, pred_action_m_all, gt_action_m, start_pos_m):
+        pred_xyz = start_pos_m[None, :, None, :] + torch.cumsum(pred_action_m_all, dim=2)
+        gt_xyz = start_pos_m[None, :, None, :] + torch.cumsum(gt_action_m[None, :, :, :], dim=2)
+        dist = torch.linalg.norm(pred_xyz - gt_xyz, dim=-1)
+        gt_path_len = torch.linalg.norm(gt_action_m, dim=-1).sum(dim=1).clamp(min=1e-6)
+        path_error_pct = dist.sum(dim=2) / gt_path_len[None, :] * 100.0
+        best_idx = torch.argmin(path_error_pct, dim=0)
+        batch_idx = torch.arange(gt_action_m.shape[0], device=gt_action_m.device)
+        best_pred_action_m = pred_action_m_all[best_idx, batch_idx]
+        best_dist = dist[best_idx, batch_idx]
+        best_metrics = self._reduce_metrics(best_pred_action_m, gt_action_m, best_dist, gt_path_len)
+        return best_metrics, best_pred_action_m, best_idx
 
     def run(self, policy):
         device = self.device if self.device is not None else policy.device
@@ -90,8 +139,21 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         mae_vals = []
         ade_vals = []
         fde_vals = []
-        ade_ratio_pct_vals = []
-        plot_data = None
+        path_error_pct_vals = []
+        fde_ratio_pct_vals = []
+        top1_subset_ade_vals = []
+        top1_subset_fde_vals = []
+        top1_subset_path_error_pct_vals = []
+        top1_subset_fde_ratio_pct_vals = []
+        best_of_n_mse_vals = []
+        best_of_n_mae_vals = []
+        best_of_n_ade_vals = []
+        best_of_n_fde_vals = []
+        best_of_n_path_error_pct_vals = []
+        best_of_n_fde_ratio_pct_vals = []
+        best_of_n_batch_count = 0
+        plot_data_top1 = None
+        plot_data_best_of_n = None
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_dataloader):
@@ -119,26 +181,73 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 plot_gt_m = plot_gt_action * self.action_scale_to_meter
                 plot_start_pos_m = plot_start_pos * self.action_scale_to_meter
 
-                # Position-space trajectory error (meters)
-                pred_xyz = plot_start_pos_m[:, None, :] + torch.cumsum(plot_pred_m, dim=1)
-                gt_xyz = plot_start_pos_m[:, None, :] + torch.cumsum(plot_gt_m, dim=1)
-                dist = torch.linalg.norm(pred_xyz - gt_xyz, dim=-1)
-                ade = dist.mean()
-                fde = dist[:, -1].mean()
-                # Relative error percentage: (sum of step errors / GT trajectory length) * 100
-                sample_total_err = dist.sum(dim=1)
-                gt_traj_len = torch.linalg.norm(plot_gt_m, dim=-1).sum(dim=1).clamp(min=1e-6)
-                ade_ratio_pct = (sample_total_err / gt_traj_len * 100.0).mean()
+                dist, gt_traj_len = self._compute_path_stats(
+                    pred_action_m=plot_pred_m,
+                    gt_action_m=plot_gt_m,
+                    start_pos_m=plot_start_pos_m,
+                )
+                top1_metrics = self._reduce_metrics(
+                    pred_action_m=plot_pred_m,
+                    gt_action_m=plot_gt_m,
+                    dist=dist,
+                    gt_path_len=gt_traj_len,
+                )
+                mse_vals.append(top1_metrics["action_mse"])
+                mae_vals.append(top1_metrics["action_mae"])
+                ade_vals.append(top1_metrics["traj_ade_m"])
+                fde_vals.append(top1_metrics["traj_fde_m"])
+                path_error_pct_vals.append(top1_metrics["traj_path_error_pct"])
+                fde_ratio_pct_vals.append(top1_metrics["traj_fde_ratio_pct"])
 
-                mse = torch.nn.functional.mse_loss(pred_action_m, gt_action_m)
-                mae = torch.nn.functional.l1_loss(pred_action_m, gt_action_m)
-                mse_vals.append(mse.item())
-                mae_vals.append(mae.item())
-                ade_vals.append(ade.item())
-                fde_vals.append(fde.item())
-                ade_ratio_pct_vals.append(ade_ratio_pct.item())
-                if self.save_plots and (self.plot_action or self.plot_trajectory3d) and (plot_data is None):
-                    plot_data = {
+                if self.multi_sample_eval_samples > 1:
+                    use_multi_sample_batch = (
+                        self.multi_sample_eval_max_batches is None
+                        or (batch_idx + 1) <= self.multi_sample_eval_max_batches
+                    )
+                    if use_multi_sample_batch:
+                        pred_action_samples_m = [plot_pred_m]
+                        for _ in range(1, self.multi_sample_eval_samples):
+                            sample_result = policy.predict_action(obs_dict)
+                            pred_action_samples_m.append(
+                                sample_result["action"] * self.action_scale_to_meter
+                            )
+
+                        pred_action_m_all = torch.stack(pred_action_samples_m, dim=0)
+                        best_of_n_metrics, best_pred_action_m, best_idx = self._select_best_of_n(
+                            pred_action_m_all=pred_action_m_all,
+                            gt_action_m=plot_gt_m,
+                            start_pos_m=plot_start_pos_m,
+                        )
+                        top1_subset_ade_vals.append(top1_metrics["traj_ade_m"])
+                        top1_subset_fde_vals.append(top1_metrics["traj_fde_m"])
+                        top1_subset_path_error_pct_vals.append(top1_metrics["traj_path_error_pct"])
+                        top1_subset_fde_ratio_pct_vals.append(top1_metrics["traj_fde_ratio_pct"])
+                        best_of_n_mse_vals.append(best_of_n_metrics["action_mse"])
+                        best_of_n_mae_vals.append(best_of_n_metrics["action_mae"])
+                        best_of_n_ade_vals.append(best_of_n_metrics["traj_ade_m"])
+                        best_of_n_fde_vals.append(best_of_n_metrics["traj_fde_m"])
+                        best_of_n_path_error_pct_vals.append(best_of_n_metrics["traj_path_error_pct"])
+                        best_of_n_fde_ratio_pct_vals.append(best_of_n_metrics["traj_fde_ratio_pct"])
+                        best_of_n_batch_count += 1
+
+                        if self.save_plots and (self.plot_action or self.plot_trajectory3d) and (plot_data_best_of_n is None):
+                            plot_data_best_of_n = {
+                                "pred": best_pred_action_m[: self.plot_num_samples].detach().cpu().numpy(),
+                                "gt": plot_gt_m[: self.plot_num_samples].detach().cpu().numpy(),
+                                "start_pos": plot_start_pos_m[: self.plot_num_samples].detach().cpu().numpy(),
+                                "obs_pos_full": (
+                                    batch["obs"][: self.plot_num_samples, :, self.position_slice]
+                                    * self.action_scale_to_meter
+                                ).detach().cpu().numpy(),
+                                "n_obs_steps": int(policy.n_obs_steps),
+                                "variant_tag": f"bestof{self.multi_sample_eval_samples}",
+                                "variant_title": f"best-of-{self.multi_sample_eval_samples}",
+                                "pred_label": f"best_of_{self.multi_sample_eval_samples}",
+                                "choice_idx": best_idx[: self.plot_num_samples].detach().cpu().numpy(),
+                            }
+
+                if self.save_plots and (self.plot_action or self.plot_trajectory3d) and (plot_data_top1 is None):
+                    plot_data_top1 = {
                         "pred": plot_pred_m[: self.plot_num_samples].detach().cpu().numpy(),
                         "gt": plot_gt_m[: self.plot_num_samples].detach().cpu().numpy(),
                         "start_pos": plot_start_pos_m[: self.plot_num_samples].detach().cpu().numpy(),
@@ -147,6 +256,9 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                             * self.action_scale_to_meter
                         ).detach().cpu().numpy(),
                         "n_obs_steps": int(policy.n_obs_steps),
+                        "variant_tag": "top1",
+                        "variant_title": "top-1",
+                        "pred_label": "top1_pred",
                     }
 
                 if (self.max_batches is not None) and (batch_idx + 1 >= self.max_batches):
@@ -160,14 +272,33 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 "eval_action_mae": float("nan"),
                 "eval_traj_ade_m": float("nan"),
                 "eval_traj_fde_m": float("nan"),
+                "eval_traj_path_error_pct": float("nan"),
+                "eval_traj_fde_ratio_pct": float("nan"),
                 "eval_traj_ade_ratio_pct": float("nan"),
             }
+            if best_of_n_batch_count > 0:
+                metrics.update({
+                    "eval_best_of_n_action_mse": float("nan"),
+                    "eval_best_of_n_action_mae": float("nan"),
+                    "eval_best_of_n_traj_ade_m": float("nan"),
+                    "eval_best_of_n_traj_fde_m": float("nan"),
+                    "eval_best_of_n_traj_path_error_pct": float("nan"),
+                    "eval_best_of_n_traj_fde_ratio_pct": float("nan"),
+                    "eval_top1_subset_traj_ade_m": float("nan"),
+                    "eval_top1_subset_traj_fde_m": float("nan"),
+                    "eval_top1_subset_traj_path_error_pct": float("nan"),
+                    "eval_top1_subset_traj_fde_ratio_pct": float("nan"),
+                    "eval_best_of_n_gain_traj_path_error_pct": float("nan"),
+                    "eval_best_of_n_samples": float(self.multi_sample_eval_samples),
+                    "eval_best_of_n_batches": float(best_of_n_batch_count),
+                })
         else:
             mse = float(np.mean(mse_vals))
             mae = float(np.mean(mae_vals))
             ade = float(np.mean(ade_vals))
             fde = float(np.mean(fde_vals))
-            ade_ratio_pct = float(np.mean(ade_ratio_pct_vals))
+            path_error_pct = float(np.mean(path_error_pct_vals))
+            fde_ratio_pct = float(np.mean(fde_ratio_pct_vals))
             # higher is better for topk manager -> use negative ADE as score
             metrics = {
                 "test/mean_score": -ade,
@@ -175,16 +306,44 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 "eval_action_mae": mae,
                 "eval_traj_ade_m": ade,
                 "eval_traj_fde_m": fde,
-                "eval_traj_ade_ratio_pct": ade_ratio_pct,
+                "eval_traj_path_error_pct": path_error_pct,
+                "eval_traj_fde_ratio_pct": fde_ratio_pct,
+                # Backward-compatible alias for old logs and analysis scripts.
+                "eval_traj_ade_ratio_pct": path_error_pct,
             }
+            if best_of_n_batch_count > 0:
+                top1_subset_path_error_pct = float(np.mean(top1_subset_path_error_pct_vals))
+                best_of_n_path_error_pct = float(np.mean(best_of_n_path_error_pct_vals))
+                metrics.update({
+                    "eval_best_of_n_action_mse": float(np.mean(best_of_n_mse_vals)),
+                    "eval_best_of_n_action_mae": float(np.mean(best_of_n_mae_vals)),
+                    "eval_best_of_n_traj_ade_m": float(np.mean(best_of_n_ade_vals)),
+                    "eval_best_of_n_traj_fde_m": float(np.mean(best_of_n_fde_vals)),
+                    "eval_best_of_n_traj_path_error_pct": best_of_n_path_error_pct,
+                    "eval_best_of_n_traj_fde_ratio_pct": float(np.mean(best_of_n_fde_ratio_pct_vals)),
+                    "eval_top1_subset_traj_ade_m": float(np.mean(top1_subset_ade_vals)),
+                    "eval_top1_subset_traj_fde_m": float(np.mean(top1_subset_fde_vals)),
+                    "eval_top1_subset_traj_path_error_pct": top1_subset_path_error_pct,
+                    "eval_top1_subset_traj_fde_ratio_pct": float(np.mean(top1_subset_fde_ratio_pct_vals)),
+                    "eval_best_of_n_gain_traj_path_error_pct": (
+                        top1_subset_path_error_pct - best_of_n_path_error_pct
+                    ),
+                    "eval_best_of_n_samples": float(self.multi_sample_eval_samples),
+                    "eval_best_of_n_batches": float(best_of_n_batch_count),
+                })
 
         if self.save_plots and (self.eval_count % self.plot_interval == 0):
             os.makedirs(self.plot_dir, exist_ok=True)
-            if plot_data is not None:
+            if plot_data_top1 is not None:
                 if self.plot_action:
-                    self._save_action_plot(plot_data)
+                    self._save_action_plot(plot_data_top1)
                 if self.plot_trajectory3d:
-                    self._save_trajectory3d_plots(plot_data)
+                    self._save_trajectory3d_plots(plot_data_top1)
+            if plot_data_best_of_n is not None:
+                if self.plot_action:
+                    self._save_action_plot(plot_data_best_of_n)
+                if self.plot_trajectory3d:
+                    self._save_trajectory3d_plots(plot_data_best_of_n)
             if self.plot_curves:
                 self._save_curve_plot()
 
@@ -198,6 +357,10 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         start_pos = plot_data["start_pos"]
         obs_pos_full = plot_data.get("obs_pos_full", None)
         n_obs_steps = int(plot_data.get("n_obs_steps", 1))
+        variant_tag = plot_data.get("variant_tag", "pred")
+        variant_title = plot_data.get("variant_title", "prediction")
+        pred_label = plot_data.get("pred_label", "pred_future")
+        choice_idx = plot_data.get("choice_idx", None)
         if pred.ndim != 3 or gt.ndim != 3:
             return
         n_samples = pred.shape[0]
@@ -276,7 +439,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                     pred_future_plot[:, d],
                     color="tab:orange",
                     linewidth=1.4,
-                    label="pred_future" if d == 0 else None,
+                    label=pred_label if d == 0 else None,
                 )
                 ax_abs.scatter(
                     [len(history) - 1],
@@ -310,22 +473,29 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 col = d % ncols
                 axes[row, col].axis("off")
                 axes[base_rows + row, col].axis("off")
+            choice_text = ""
+            if choice_idx is not None:
+                choice_text = f", choice {int(choice_idx[s])}"
             fig.suptitle(
-                f"UAV delta + full absolute trajectory (eval {self.eval_count}, sample {s})"
+                f"UAV delta + full absolute trajectory ({variant_title}, eval {self.eval_count}, sample {s}{choice_text})"
             )
             fig.tight_layout()
             fig.subplots_adjust(top=0.90)
-            out_path = os.path.join(self.plot_dir, f"action_pred_eval{self.eval_count:04d}_s{s}.png")
+            out_path = os.path.join(
+                self.plot_dir,
+                f"action_{variant_tag}_eval{self.eval_count:04d}_s{s}.png",
+            )
             fig.savefig(out_path, dpi=150)
             plt.close(fig)
 
         # save raw arrays for inspection
         np.savez_compressed(
-            os.path.join(self.plot_dir, f"action_pred_eval{self.eval_count:04d}.npz"),
+            os.path.join(self.plot_dir, f"action_{variant_tag}_eval{self.eval_count:04d}.npz"),
             pred=pred,
             gt=gt,
             start_pos=start_pos,
             obs_pos_full=obs_pos_full,
+            choice_idx=choice_idx,
         )
 
     def _save_trajectory3d_plots(self, plot_data):
@@ -336,6 +506,10 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         start_pos = plot_data["start_pos"]
         obs_pos_full = plot_data.get("obs_pos_full", None)
         n_obs_steps = int(plot_data.get("n_obs_steps", 1))
+        variant_tag = plot_data.get("variant_tag", "pred")
+        variant_title = plot_data.get("variant_title", "prediction")
+        pred_label = plot_data.get("pred_label", "pred_future")
+        choice_idx = plot_data.get("choice_idx", None)
         if pred.ndim != 3 or gt.ndim != 3 or pred.shape[2] != 3:
             return
 
@@ -361,9 +535,23 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 gt_future_xyz=future_gt,
                 pred_future_xyz=pred_future,
                 sample_idx=s,
+                variant_tag=variant_tag,
+                variant_title=variant_title,
+                pred_label=pred_label,
+                choice_idx=None if choice_idx is None else int(choice_idx[s]),
             )
 
-    def _save_trajectory3d_plot(self, history_xyz, gt_future_xyz, pred_future_xyz, sample_idx):
+    def _save_trajectory3d_plot(
+        self,
+        history_xyz,
+        gt_future_xyz,
+        pred_future_xyz,
+        sample_idx,
+        variant_tag="pred",
+        variant_title="prediction",
+        pred_label="pred_future",
+        choice_idx=None,
+    ):
         history_plot = np.asarray(history_xyz, dtype=np.float32)
         gt_future_plot = np.asarray(gt_future_xyz, dtype=np.float32)
         pred_future_plot = np.asarray(pred_future_xyz, dtype=np.float32)
@@ -382,7 +570,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         )
         ax.plot(
             pred_plot[:, 0], pred_plot[:, 1], pred_plot[:, 2],
-            color="tab:orange", linewidth=1.8, label="pred_future"
+            color="tab:orange", linewidth=1.8, label=pred_label
         )
         ax.scatter(start_xyz[:, 0], start_xyz[:, 1], start_xyz[:, 2], c="k", s=26, label="current")
         ax.scatter(gt_plot[-1:, 0], gt_plot[-1:, 1], gt_plot[-1:, 2], c="tab:blue", s=24, marker="x")
@@ -390,11 +578,19 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         ax.set_xlabel("x (m)")
         ax.set_ylabel("y (m)")
         ax.set_zlabel("z (m)")
-        ax.set_title(f"3D history + future trajectory (eval {self.eval_count}, sample {sample_idx})")
+        choice_text = ""
+        if choice_idx is not None:
+            choice_text = f", choice {choice_idx}"
+        ax.set_title(
+            f"3D history + future trajectory ({variant_title}, eval {self.eval_count}, sample {sample_idx}{choice_text})"
+        )
         ax.legend(loc="upper right", fontsize=8)
         self._set_equal_3d_axes(ax, np.vstack([history_plot, gt_plot, pred_plot]))
         fig.tight_layout()
-        out_path = os.path.join(self.plot_dir, f"trajectory3d_eval{self.eval_count:04d}_s{sample_idx}.png")
+        out_path = os.path.join(
+            self.plot_dir,
+            f"trajectory3d_{variant_tag}_eval{self.eval_count:04d}_s{sample_idx}.png",
+        )
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
 
@@ -419,6 +615,8 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         df = read_json_log(log_path, required_keys=self.curve_keys)
         if df.empty or "global_step" not in df:
             return
+        if "eval_traj_path_error_pct" not in df and "eval_traj_ade_ratio_pct" in df:
+            df["eval_traj_path_error_pct"] = df["eval_traj_ade_ratio_pct"]
 
         fig, ax = plt.subplots(figsize=(8, 4))
         for k in self.curve_keys:
