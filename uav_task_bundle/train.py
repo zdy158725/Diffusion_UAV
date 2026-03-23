@@ -21,7 +21,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.joinpath(
         'diffusion_policy','config')),
-    config_name="train_uav_synthetic_6step_big"
+    config_name="train_uav_synthetic_6step_big_hist32"
 )
 def main(cfg: OmegaConf):
     # 解析 cfg 对象中所有尚未解析的引用和表达式，确保所有配置值在程序启动时都被确定下来，保证实验的可复现性。

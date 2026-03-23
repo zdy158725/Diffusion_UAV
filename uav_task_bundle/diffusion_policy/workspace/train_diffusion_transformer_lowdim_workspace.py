@@ -228,6 +228,8 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
             if len(eval_epoch_history) == 0:
                 return
 
+            best_of_n_suffix = best_of_n_label.lower().replace('-', '').replace(' ', '')
+
             fig, ax = plt.subplots(figsize=(6, 4))
             if len(eval_ade_history) > 0:
                 ade_line, = ax.plot(eval_epoch_history, eval_ade_history, label='ADE (m)')
@@ -235,37 +237,11 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     ax, eval_epoch_history, eval_ade_history,
                     label='ADE', color=ade_line.get_color(), offset=(8, -18)
                 )
-            if len(eval_best_of_n_ade_history) > 0:
-                best_ade_line, = ax.plot(
-                    eval_epoch_history,
-                    eval_best_of_n_ade_history,
-                    linestyle='--',
-                    label=f'{best_of_n_label} ADE (m, subset)'
-                )
-                annotate_best_point(
-                    ax, eval_epoch_history, eval_best_of_n_ade_history,
-                    label=f'{best_of_n_label} ADE',
-                    color=best_ade_line.get_color(),
-                    offset=(8, 12)
-                )
             if len(eval_fde_history) > 0:
                 fde_line, = ax.plot(eval_epoch_history, eval_fde_history, label='FDE (m)')
                 annotate_best_point(
                     ax, eval_epoch_history, eval_fde_history,
                     label='FDE', color=fde_line.get_color(), offset=(8, 10)
-                )
-            if len(eval_best_of_n_fde_history) > 0:
-                best_fde_line, = ax.plot(
-                    eval_epoch_history,
-                    eval_best_of_n_fde_history,
-                    linestyle='--',
-                    label=f'{best_of_n_label} FDE (m, subset)'
-                )
-                annotate_best_point(
-                    ax, eval_epoch_history, eval_best_of_n_fde_history,
-                    label=f'{best_of_n_label} FDE',
-                    color=best_fde_line.get_color(),
-                    offset=(8, -22)
                 )
             ax.set_xlabel('epoch')
             ax.set_ylabel('error (m)')
@@ -274,6 +250,74 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
             fig.tight_layout()
             fig.savefig(os.path.join(plot_dir, 'traj_error_curve.png'), dpi=150)
             plt.close(fig)
+
+            has_best_of_n_error = (
+                len(eval_top1_subset_ade_history) > 0 or
+                len(eval_top1_subset_fde_history) > 0 or
+                len(eval_best_of_n_ade_history) > 0 or
+                len(eval_best_of_n_fde_history) > 0
+            )
+            if has_best_of_n_error:
+                fig, ax = plt.subplots(figsize=(6, 4))
+                if len(eval_top1_subset_ade_history) > 0:
+                    subset_ade_line, = ax.plot(
+                        eval_epoch_history,
+                        eval_top1_subset_ade_history,
+                        linestyle=':',
+                        label='Top-1 subset ADE (m)'
+                    )
+                    annotate_best_point(
+                        ax, eval_epoch_history, eval_top1_subset_ade_history,
+                        label='top1 subset ADE',
+                        color=subset_ade_line.get_color(),
+                        offset=(8, -18)
+                    )
+                if len(eval_best_of_n_ade_history) > 0:
+                    best_ade_line, = ax.plot(
+                        eval_epoch_history,
+                        eval_best_of_n_ade_history,
+                        linestyle='--',
+                        label=f'{best_of_n_label} ADE (m, subset)'
+                    )
+                    annotate_best_point(
+                        ax, eval_epoch_history, eval_best_of_n_ade_history,
+                        label=f'{best_of_n_label} ADE',
+                        color=best_ade_line.get_color(),
+                        offset=(8, 12)
+                    )
+                if len(eval_top1_subset_fde_history) > 0:
+                    subset_fde_line, = ax.plot(
+                        eval_epoch_history,
+                        eval_top1_subset_fde_history,
+                        linestyle=':',
+                        label='Top-1 subset FDE (m)'
+                    )
+                    annotate_best_point(
+                        ax, eval_epoch_history, eval_top1_subset_fde_history,
+                        label='top1 subset FDE',
+                        color=subset_fde_line.get_color(),
+                        offset=(8, 10)
+                    )
+                if len(eval_best_of_n_fde_history) > 0:
+                    best_fde_line, = ax.plot(
+                        eval_epoch_history,
+                        eval_best_of_n_fde_history,
+                        linestyle='--',
+                        label=f'{best_of_n_label} FDE (m, subset)'
+                    )
+                    annotate_best_point(
+                        ax, eval_epoch_history, eval_best_of_n_fde_history,
+                        label=f'{best_of_n_label} FDE',
+                        color=best_fde_line.get_color(),
+                        offset=(8, -22)
+                    )
+                ax.set_xlabel('epoch')
+                ax.set_ylabel('error (m)')
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+                fig.tight_layout()
+                fig.savefig(os.path.join(plot_dir, f'traj_error_curve_{best_of_n_suffix}.png'), dpi=150)
+                plt.close(fig)
 
             if len(eval_ratio_pct_history) > 0:
                 fig, ax = plt.subplots(figsize=(6, 4))
@@ -287,13 +331,33 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     ax, eval_epoch_history, eval_ratio_pct_history,
                     label='top1', color=ratio_line.get_color(), offset=(8, 10)
                 )
+                ax.set_xlabel('epoch')
+                ax.set_ylabel('ratio (%)')
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+                fig.tight_layout()
+                fig.savefig(os.path.join(plot_dir, 'traj_error_ratio_curve.png'), dpi=150)
+                plt.close(fig)
+
+            has_best_of_n_ratio = (
+                len(eval_top1_subset_ratio_pct_history) > 0 or
+                len(eval_best_of_n_ratio_pct_history) > 0
+            )
+            if has_best_of_n_ratio:
+                fig, ax = plt.subplots(figsize=(6, 4))
                 if len(eval_top1_subset_ratio_pct_history) > 0:
-                    ax.plot(
+                    subset_ratio_line, = ax.plot(
                         eval_epoch_history,
                         eval_top1_subset_ratio_pct_history,
                         color='0.5',
                         linestyle=':',
                         label='Top-1 subset path err (%)'
+                    )
+                    annotate_best_point(
+                        ax, eval_epoch_history, eval_top1_subset_ratio_pct_history,
+                        label='top1 subset',
+                        color=subset_ratio_line.get_color(),
+                        offset=(8, 10)
                     )
                 if len(eval_best_of_n_ratio_pct_history) > 0:
                     best_ratio_line, = ax.plot(
@@ -314,7 +378,7 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                 ax.grid(True, alpha=0.3)
                 ax.legend()
                 fig.tight_layout()
-                fig.savefig(os.path.join(plot_dir, 'traj_error_ratio_curve.png'), dpi=150)
+                fig.savefig(os.path.join(plot_dir, f'traj_error_ratio_curve_{best_of_n_suffix}.png'), dpi=150)
                 plt.close(fig)
 
         train_start_time = time.time()

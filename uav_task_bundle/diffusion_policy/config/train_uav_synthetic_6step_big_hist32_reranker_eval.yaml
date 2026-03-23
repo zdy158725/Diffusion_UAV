@@ -1,0 +1,14 @@
+defaults:
+  - train_uav_synthetic_6step_big_hist32
+  - _self_
+
+name: train_uav_transformer_synthetic_6step_big_hist32_reranker_eval
+
+task:
+  env_runner:
+    _target_: diffusion_policy.env_runner.uav_synthetic_reranker_offline_runner.UAVSyntheticRerankerOfflineRunner
+    candidate_selection_mode: reranker_best_of_n
+    selection_num_candidates: 10
+    reranker_checkpoint: null
+    multi_sample_eval_samples: 10
+    multi_sample_eval_max_batches: null

@@ -1,0 +1,28 @@
+defaults:
+  - task: uav_synthetic
+  - _self_
+
+name: build_uav_synthetic_reranker_cache
+
+horizon: 18
+n_obs_steps: 12
+n_action_steps: 6
+pred_action_steps_only: True
+
+checkpoint_path: null
+use_ema_model: True
+seed: 32
+device: "cuda:0"
+training:
+  device: ${device}
+num_candidates: 10
+batch_size: 256
+num_workers: 4
+pin_memory: True
+persistent_workers: True
+max_train_batches: null
+max_val_batches: null
+train_output_path: ${hydra:runtime.cwd}/data/uav_synthetic_reranker/uav_synthetic_6step_candidates_train.zarr
+val_output_path: ${hydra:runtime.cwd}/data/uav_synthetic_reranker/uav_synthetic_6step_candidates_val.zarr
+
+_target_: diffusion_policy.workspace.build_reranker_candidate_cache_workspace.BuildRerankerCandidateCacheWorkspace

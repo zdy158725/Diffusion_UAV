@@ -77,12 +77,14 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             "eval_traj_ade_m",
             "eval_traj_fde_m",
             "eval_traj_path_error_pct",
+            "eval_traj_fde_ratio_pct",
             "eval_top1_subset_traj_path_error_pct",
+            "eval_top1_subset_traj_fde_ratio_pct",
             "eval_best_of_n_traj_ade_m",
             "eval_best_of_n_traj_fde_m",
             "eval_best_of_n_traj_path_error_pct",
+            "eval_best_of_n_traj_fde_ratio_pct",
             "eval_best_of_n_gain_traj_path_error_pct",
-            "eval_traj_fde_ratio_pct",
             "eval_action_mse",
             "eval_action_mae",
             "val_loss",
@@ -606,6 +608,18 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         ax.set_ylim(center[1] - radius, center[1] + radius)
         ax.set_zlim(center[2] - radius, center[2] + radius)
 
+    def _plot_curve_group(self, ax, df, keys):
+        plotted = False
+        for k in keys:
+            if k not in df:
+                continue
+            s = df[k].dropna()
+            if len(s) == 0:
+                continue
+            ax.plot(df.loc[s.index, "global_step"], s, label=k)
+            plotted = True
+        return plotted
+
     def _save_curve_plot(self):
         if plt is None:
             return
@@ -618,13 +632,18 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         if "eval_traj_path_error_pct" not in df and "eval_traj_ade_ratio_pct" in df:
             df["eval_traj_path_error_pct"] = df["eval_traj_ade_ratio_pct"]
 
+        main_keys = [
+            "eval_traj_ade_m",
+            "eval_traj_fde_m",
+            "eval_traj_path_error_pct",
+            "eval_traj_fde_ratio_pct",
+            "eval_action_mse",
+            "eval_action_mae",
+            "val_loss",
+            "train_action_mse_error",
+        ]
         fig, ax = plt.subplots(figsize=(8, 4))
-        for k in self.curve_keys:
-            if k in df:
-                s = df[k].dropna()
-                if len(s) == 0:
-                    continue
-                ax.plot(df.loc[s.index, "global_step"], s, label=k)
+        self._plot_curve_group(ax, df, main_keys)
 
         if self.curve_show_test_mse and ("test/mean_score" in df):
             s = df["test/mean_score"].dropna()
@@ -636,4 +655,40 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         ax.legend(fontsize=8, ncol=2)
         fig.tight_layout()
         fig.savefig(os.path.join(self.plot_dir, "metrics.png"), dpi=150)
+        plt.close(fig)
+
+        best_of_n_error_keys = [
+            "eval_top1_subset_traj_path_error_pct",
+            "eval_best_of_n_traj_path_error_pct",
+            "eval_best_of_n_gain_traj_path_error_pct",
+        ]
+        best_of_n_ratio_keys = [
+            "eval_top1_subset_traj_fde_ratio_pct",
+            "eval_best_of_n_traj_fde_ratio_pct",
+        ]
+        has_best_of_n = any(
+            (k in df) and (len(df[k].dropna()) > 0)
+            for k in (best_of_n_error_keys + best_of_n_ratio_keys)
+        )
+        if not has_best_of_n:
+            return
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        plotted_error = self._plot_curve_group(axes[0], df, best_of_n_error_keys)
+        plotted_ratio = self._plot_curve_group(axes[1], df, best_of_n_ratio_keys)
+
+        axes[0].set_xlabel("global_step")
+        axes[0].set_ylabel("path_error_pct")
+        axes[0].set_title("best-of-n path error")
+        if plotted_error:
+            axes[0].legend(fontsize=8)
+
+        axes[1].set_xlabel("global_step")
+        axes[1].set_ylabel("fde_ratio_pct")
+        axes[1].set_title("best-of-n ratio")
+        if plotted_ratio:
+            axes[1].legend(fontsize=8)
+
+        fig.tight_layout()
+        fig.savefig(os.path.join(self.plot_dir, "best_of_n_metrics.png"), dpi=150)
         plt.close(fig)
