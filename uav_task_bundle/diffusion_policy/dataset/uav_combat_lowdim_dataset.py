@@ -33,6 +33,10 @@ class UAVCombatBatchCollator:
 
 
 class UAVCombatLowdimDataset(BaseLowdimDataset):
+    OBS_MODE_SLICE = 'slice'
+    OBS_MODE_ENEMY0_OWN_REL24 = 'enemy0_abs_plus_own_rel24'
+    OBS_MODE_ENEMY0_OWN_REL24_GEO39 = 'enemy0_abs_plus_own_rel24_geo39'
+
     def __init__(self,
             zarr_path,
             horizon=1,
@@ -40,6 +44,7 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
             pad_after=0,
             obs_key='uav_observations',
             obs_slice=(21, 27),
+            obs_mode='slice',
             seed=42,
             val_ratio=0.0,
             max_train_episodes=None
@@ -71,17 +76,112 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
             episode_mask=train_mask
             )
 
+        self.obs_mode = str(obs_mode)
+        valid_modes = {
+            self.OBS_MODE_SLICE,
+            self.OBS_MODE_ENEMY0_OWN_REL24,
+            self.OBS_MODE_ENEMY0_OWN_REL24_GEO39,
+        }
+        if self.obs_mode not in valid_modes:
+            raise ValueError(f"Unsupported obs_mode={self.obs_mode}. Expected one of {sorted(valid_modes)}")
+
         obs_slice = tuple(obs_slice)
         if len(obs_slice) != 2:
             raise ValueError(f"obs_slice should have length 2, got {obs_slice}")
         self.obs_slice = slice(int(obs_slice[0]), int(obs_slice[1]))
+        # Output obs must keep enemy0 absolute xyz in the first 3 dims so that
+        # action differencing and trajectory anchoring stay compatible.
         self.position_slice = slice(0, 3)
+        self.obs_dim = self._infer_obs_dim()
 
         self.obs_key = obs_key
         self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
+
+    def _infer_obs_dim(self) -> int:
+        if self.obs_mode == self.OBS_MODE_SLICE:
+            return int(self.obs_slice.stop - self.obs_slice.start)
+        if self.obs_mode == self.OBS_MODE_ENEMY0_OWN_REL24:
+            return 24
+        if self.obs_mode == self.OBS_MODE_ENEMY0_OWN_REL24_GEO39:
+            return 39
+        raise RuntimeError(f"Unexpected obs_mode={self.obs_mode}")
+
+    def _build_enemy0_own_rel24_parts(self, obs: np.ndarray):
+        if obs.shape[-1] < 42:
+            raise ValueError(
+                "enemy0_abs_plus_own_rel24 expects raw obs dim >= 42, "
+                f"got {obs.shape[-1]}"
+            )
+
+        enemy0_abs = obs[..., 21:27]
+        enemy0_pos = enemy0_abs[..., 0:3]
+        enemy0_vel = enemy0_abs[..., 3:6]
+
+        own_rel_parts = []
+        for start in (0, 7, 14):
+            own_abs = obs[..., start:start + 6]
+            own_pos = own_abs[..., 0:3]
+            own_vel = own_abs[..., 3:6]
+            own_rel = np.concatenate([
+                own_pos - enemy0_pos,
+                own_vel - enemy0_vel,
+            ], axis=-1)
+            own_rel_parts.append(own_rel.astype(np.float32, copy=False))
+        return enemy0_abs.astype(np.float32, copy=False), own_rel_parts
+
+    def _build_xy_geometry_features(self, own_rel_parts) -> np.ndarray:
+        eps = np.float32(1e-6)
+        geo_parts = []
+        for own_rel in own_rel_parts:
+            dx = own_rel[..., 0]
+            dy = own_rel[..., 1]
+            dvx = own_rel[..., 3]
+            dvy = own_rel[..., 4]
+
+            r_xy = np.sqrt(dx * dx + dy * dy).astype(np.float32, copy=False)
+            valid = r_xy >= eps
+            denom = np.where(valid, r_xy, np.float32(1.0)).astype(np.float32, copy=False)
+
+            sin_theta = np.where(valid, dy / denom, np.float32(0.0)).astype(np.float32, copy=False)
+            cos_theta = np.where(valid, dx / denom, np.float32(0.0)).astype(np.float32, copy=False)
+            v_radial = np.where(
+                valid,
+                (dx * dvx + dy * dvy) / denom,
+                np.float32(0.0),
+            ).astype(np.float32, copy=False)
+            v_tangential = np.where(
+                valid,
+                (dx * dvy - dy * dvx) / denom,
+                np.float32(0.0),
+            ).astype(np.float32, copy=False)
+
+            geo_parts.append(np.stack(
+                [r_xy, sin_theta, cos_theta, v_radial, v_tangential],
+                axis=-1
+            ).astype(np.float32, copy=False))
+        return np.concatenate(geo_parts, axis=-1).astype(np.float32, copy=False)
+
+    def _build_obs_features(self, obs_raw: np.ndarray) -> np.ndarray:
+        obs = obs_raw.reshape(obs_raw.shape[0], -1).astype(np.float32, copy=False)
+        if self.obs_mode == self.OBS_MODE_SLICE:
+            return obs[..., self.obs_slice]
+
+        if self.obs_mode not in {
+            self.OBS_MODE_ENEMY0_OWN_REL24,
+            self.OBS_MODE_ENEMY0_OWN_REL24_GEO39,
+        }:
+            raise RuntimeError(f"Unexpected obs_mode={self.obs_mode}")
+
+        enemy0_abs, own_rel_parts = self._build_enemy0_own_rel24_parts(obs)
+        base_features = np.concatenate([enemy0_abs] + own_rel_parts, axis=-1).astype(np.float32, copy=False)
+        if self.obs_mode == self.OBS_MODE_ENEMY0_OWN_REL24:
+            return base_features
+
+        geometry_features = self._build_xy_geometry_features(own_rel_parts)
+        return np.concatenate([base_features, geometry_features], axis=-1).astype(np.float32, copy=False)
 
     def _compute_action_from_obs_np(self, obs: np.ndarray, episode_ends=None) -> np.ndarray:
         pos = obs[..., self.position_slice]
@@ -153,8 +253,7 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
 
     def _sample_to_obs(self, sample):
         obs_raw = sample[self.obs_key]
-        obs = obs_raw.reshape(obs_raw.shape[0], -1)
-        return obs[..., self.obs_slice]
+        return self._build_obs_features(obs_raw)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(idx)
