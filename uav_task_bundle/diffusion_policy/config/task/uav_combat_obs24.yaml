@@ -1,0 +1,30 @@
+name: uav_combat_obs24
+
+obs_dim: 24
+action_dim: 3
+
+env_runner:
+  _target_: diffusion_policy.env_runner.uav_combat_offline_runner.UAVCombatOfflineRunner
+  dataset: ${..dataset}
+  batch_size: 256
+  num_workers: 0
+  pin_memory: True
+  device: ${training.device}
+  max_batches: null
+  save_plots: True
+  plot_dir: plots
+  plot_interval: 10
+  plot_num_samples: 2
+  plot_action: True
+  plot_curves: True
+  curve_log_path: logs.json.txt
+
+dataset:
+  _target_: diffusion_policy.dataset.uav_combat_lowdim_dataset.UAVCombatLowdimDataset
+  zarr_path: ${hydra:runtime.cwd}/data/uav_combat/test_data_mode_switch.zarr
+  obs_mode: enemy0_abs_plus_own_rel24
+  horizon: ${horizon}
+  pad_before: 0
+  pad_after: 0
+  seed: 42
+  val_ratio: 0.1

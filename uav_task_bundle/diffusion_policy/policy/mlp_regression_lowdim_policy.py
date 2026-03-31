@@ -75,7 +75,11 @@ class MLPRegressionLowdimPolicy(BaseLowdimPolicy):
         pred = self.network(flat)
         return pred.reshape(-1, self.n_action_steps, self.action_dim)
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+        generator: torch.Generator = None,
+    ) -> Dict[str, torch.Tensor]:
         assert "obs" in obs_dict
         nobs = self.normalizer["obs"].normalize(obs_dict["obs"])
         naction = self._predict_normalized_action(nobs)

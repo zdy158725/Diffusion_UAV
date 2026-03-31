@@ -1,8 +1,8 @@
 defaults:
   - _self_
-  - task: uav_combat_obs24_geo39
+  - task: uav_combat_obs24
 
-name: train_uav_transformer_combat_obs24_geo39
+name: train_uav_transformer_combat_obs24
 task_name: ${task.name}
 
 horizon: 30
@@ -55,7 +55,7 @@ policy:
     prediction_type: epsilon
 
 training:
-  device: "cuda:3"
+  device: "cuda:0"
   seed: 32
   debug: False
   resume: False
@@ -93,7 +93,7 @@ logging:
   resume: True
   mode: disabled
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
-  tags: ["${name}", "${task_name}", "combat_obs24_geo39"]
+  tags: ["${name}", "${task_name}", "combat_obs24"]
   id: null
   group: null
 

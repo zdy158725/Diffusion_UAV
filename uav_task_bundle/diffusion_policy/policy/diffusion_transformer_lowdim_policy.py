@@ -119,7 +119,11 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         return trajectory
 
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+        generator: torch.Generator = None,
+    ) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
         result: must include "action" key
@@ -159,11 +163,13 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
 
         # run sampling
         nsample = self.conditional_sample(
-            cond_data, 
+            cond_data,
             cond_mask,
             cond=cond,
+            generator=generator,
             token_offset=self.get_action_token_offset(),
-            **self.kwargs)
+            **self.kwargs,
+        )
         
         # unnormalize prediction
         naction_pred = nsample[...,:Da]

@@ -1,0 +1,29 @@
+defaults:
+  - task: uav_synthetic
+  - _self_
+
+name: build_uav_synthetic_fixedbank4_cache_hist32
+
+horizon: 44
+n_obs_steps: 32
+n_action_steps: 12
+pred_action_steps_only: True
+
+checkpoint_path: null
+use_ema_model: True
+seed: 32
+device: "cuda:0"
+training:
+  device: ${device}
+candidate_seed_bank: [101, 202, 303, 404]
+num_candidates: 4
+batch_size: 256
+num_workers: 4
+pin_memory: True
+persistent_workers: True
+max_train_batches: null
+max_val_batches: null
+train_output_path: ${hydra:runtime.cwd}/data/uav_synthetic_selector/uav_synthetic_hist32_fixedbank4_candidates_train.zarr
+val_output_path: ${hydra:runtime.cwd}/data/uav_synthetic_selector/uav_synthetic_hist32_fixedbank4_candidates_val.zarr
+
+_target_: diffusion_policy.workspace.build_reranker_candidate_cache_workspace.BuildRerankerCandidateCacheWorkspace

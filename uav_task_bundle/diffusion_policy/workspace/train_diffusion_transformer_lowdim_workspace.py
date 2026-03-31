@@ -167,7 +167,7 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
         plot_dir = os.path.join(self.output_dir, 'plots')
         os.makedirs(plot_dir, exist_ok=True)
         train_loss_history = []
-        val_loss_history = []
+        val_denoise_loss_history = []
         val_epoch_history = []
         eval_ade_history = []
         eval_fde_history = []
@@ -213,9 +213,9 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
             if len(train_loss_history) == 0:
                 return
             fig, ax = plt.subplots(figsize=(6, 4))
-            ax.plot(range(len(train_loss_history)), train_loss_history, label='train')
-            if len(val_loss_history) > 0:
-                ax.plot(val_epoch_history, val_loss_history, label='val')
+            ax.plot(range(len(train_loss_history)), train_loss_history, label='train denoise')
+            if len(val_denoise_loss_history) > 0:
+                ax.plot(val_epoch_history, val_denoise_loss_history, label='val denoise')
             ax.set_xlabel('epoch')
             ax.set_ylabel('loss')
             ax.legend()
@@ -523,10 +523,12 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
                         if len(val_losses) > 0:
-                            val_loss = torch.mean(torch.tensor(val_losses)).item()
-                            # log epoch average validation loss
-                            step_log['val_loss'] = val_loss
-                            val_loss_history.append(val_loss)
+                            val_denoise_loss = torch.mean(torch.tensor(val_losses)).item()
+                            # log epoch average validation loss. Keep val_loss as a
+                            # backward-compatible alias for older analysis scripts.
+                            step_log['val_denoise_loss'] = val_denoise_loss
+                            step_log['val_loss'] = val_denoise_loss
+                            val_denoise_loss_history.append(val_denoise_loss)
                             val_epoch_history.append(len(train_loss_history)-1)
             
                 # run diffusion sampling on a training batch
@@ -592,8 +594,10 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     'train_loss': f"{train_loss:.4f}",
                     'eta_min': f"{eta_sec/60.0:.1f}",
                 }
-                if 'val_loss' in step_log:
-                    postfix['val_loss'] = f"{step_log['val_loss']:.4f}"
+                if 'val_denoise_loss' in step_log:
+                    postfix['val_denoise'] = f"{step_log['val_denoise_loss']:.4f}"
+                elif 'val_loss' in step_log:
+                    postfix['val_denoise'] = f"{step_log['val_loss']:.4f}"
                 if 'eval_traj_ade_m' in step_log:
                     postfix['ade_m'] = f"{step_log['eval_traj_ade_m']:.2f}"
                 path_err_pct = step_log.get(

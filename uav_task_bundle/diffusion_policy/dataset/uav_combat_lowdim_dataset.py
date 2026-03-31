@@ -55,7 +55,8 @@ class UAVCombatLowdimDataset(BaseLowdimDataset):
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path, keys=[obs_key])
         zroot = zarr.open(self.zarr_path, "r")
-        self.delta_max_abs = zroot.attrs.get("delta_max_abs", None)
+        self.delta_max_abs_raw = zroot.attrs.get("delta_max_abs", None)
+        self.delta_max_abs = zroot.attrs.get("delta_scale_abs", self.delta_max_abs_raw)
         self.meters_per_unit = float(zroot.attrs.get("meters_per_unit", 1.0))
 
         val_mask = get_val_mask(

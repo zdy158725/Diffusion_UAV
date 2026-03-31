@@ -60,6 +60,36 @@ class BuildRerankerCandidateCacheWorkspace(BaseWorkspace):
             policy = workspace.model
         return policy
 
+    def _get_candidate_seed_bank(self):
+        seed_bank = getattr(self.cfg, "candidate_seed_bank", None)
+        if seed_bank is None:
+            return None
+        seed_bank = [int(x) for x in seed_bank]
+        if len(seed_bank) == 0:
+            return None
+        if getattr(self.cfg, "num_candidates", None) is not None:
+            expected = int(self.cfg.num_candidates)
+            if expected != len(seed_bank):
+                raise ValueError(
+                    f"num_candidates={expected} does not match candidate_seed_bank length={len(seed_bank)}"
+                )
+        return seed_bank
+
+    def _sample_candidate_actions(self, policy, obs_dict, seed_bank):
+        cand_actions = []
+        if seed_bank is not None:
+            device = obs_dict["obs"].device
+            for seed in seed_bank:
+                generator = torch.Generator(device=device)
+                generator.manual_seed(int(seed))
+                result = policy.predict_action(obs_dict, generator=generator)
+                cand_actions.append(result["action"])
+        else:
+            for _ in range(int(self.cfg.num_candidates)):
+                result = policy.predict_action(obs_dict)
+                cand_actions.append(result["action"])
+        return torch.stack(cand_actions, dim=1)
+
     def _compute_candidate_metrics(
         self,
         cand_action: torch.Tensor,
@@ -116,6 +146,7 @@ class BuildRerankerCandidateCacheWorkspace(BaseWorkspace):
         position_slice = getattr(dataset, "position_slice", slice(0, 3))
         start, end = policy.get_action_window_indices()
         anchor_idx = policy.get_action_anchor_obs_index()
+        candidate_seed_bank = self._get_candidate_seed_bank()
 
         obs_hist_all = []
         gt_action_all = []
@@ -134,11 +165,11 @@ class BuildRerankerCandidateCacheWorkspace(BaseWorkspace):
                 gt_action = batch["action"][:, start:end]
                 start_pos = batch["obs"][:, anchor_idx, position_slice]
 
-                cand_actions = []
-                for _ in range(int(cfg.num_candidates)):
-                    result = policy.predict_action(obs_dict)
-                    cand_actions.append(result["action"])
-                cand_action = torch.stack(cand_actions, dim=1)
+                cand_action = self._sample_candidate_actions(
+                    policy=policy,
+                    obs_dict=obs_dict,
+                    seed_bank=candidate_seed_bank,
+                )
                 cand_rel_pos = torch.cumsum(cand_action, dim=2)
                 metrics = self._compute_candidate_metrics(
                     cand_action=cand_action.transpose(0, 1),
@@ -179,7 +210,12 @@ class BuildRerankerCandidateCacheWorkspace(BaseWorkspace):
         root.attrs["source_checkpoint_sha256"] = _file_sha256(os.path.expanduser(self.cfg.checkpoint_path))
         root.attrs["split"] = split_name
         root.attrs["seed"] = int(cfg.seed)
-        root.attrs["num_candidates"] = int(cfg.num_candidates)
+        root.attrs["num_candidates"] = int(cand_action.shape[1])
+        if candidate_seed_bank is not None:
+            root.attrs["candidate_seed_bank"] = [int(x) for x in candidate_seed_bank]
+            root.attrs["candidate_generation"] = "fixed_seed_bank"
+        else:
+            root.attrs["candidate_generation"] = "random_sampling"
         root.attrs["n_obs_steps"] = int(policy.n_obs_steps)
         root.attrs["n_action_steps"] = int(policy.n_action_steps)
         root.attrs["obs_dim"] = int(policy.obs_dim)

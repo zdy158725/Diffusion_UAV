@@ -270,6 +270,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         if len(mse_vals) == 0:
             metrics = {
                 "test/mean_score": 0.0,
+                "test/mean_score_path": 0.0,
                 "eval_action_mse": float("nan"),
                 "eval_action_mae": float("nan"),
                 "eval_traj_ade_m": float("nan"),
@@ -301,9 +302,10 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             fde = float(np.mean(fde_vals))
             path_error_pct = float(np.mean(path_error_pct_vals))
             fde_ratio_pct = float(np.mean(fde_ratio_pct_vals))
-            # higher is better for topk manager -> use negative ADE as score
+            # higher is better for topk manager -> use negative trajectory errors
             metrics = {
                 "test/mean_score": -ade,
+                "test/mean_score_path": -path_error_pct,
                 "eval_action_mse": mse,
                 "eval_action_mae": mae,
                 "eval_traj_ade_m": ade,

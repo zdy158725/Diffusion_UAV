@@ -1,13 +1,13 @@
 defaults:
+  - task: adsb_trajectory
   - _self_
-  - task: uav_combat_obs24_geo39
 
-name: train_uav_transformer_combat_obs24_geo39
+name: train_adsb_transformer_11hist_120future
 task_name: ${task.name}
 
-horizon: 30
-n_obs_steps: 24
-n_action_steps: 6
+horizon: 131
+n_obs_steps: 11
+n_action_steps: 120
 n_latency_steps: 0
 pred_action_steps_only: True
 
@@ -24,8 +24,8 @@ policy:
   short_horizon_loss_weight: 0.0
   terminal_pos_loss_weight: 0.1
   relative_path_loss_weight: 0.0
-  short_horizon_focus_steps: 3
-  short_horizon_focus_gain: 3.0
+  short_horizon_focus_steps: 12
+  short_horizon_focus_gain: 2.0
   model:
     _target_: diffusion_policy.model.diffusion.transformer_for_diffusion.TransformerForDiffusion
     input_dim: ${task.action_dim}
@@ -38,11 +38,11 @@ policy:
     n_emb: 512
     p_drop_emb: 0.1
     p_drop_attn: 0.1
-    n_cond_layers: 8
+    n_cond_layers: 6
     causal_attn: True
     time_as_cond: True
     obs_as_cond: True
-  num_inference_steps: 20
+  num_inference_steps: 10
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100
@@ -55,24 +55,24 @@ policy:
     prediction_type: epsilon
 
 training:
-  device: "cuda:3"
+  device: "cuda:1"
   seed: 32
   debug: False
   resume: False
-  num_epochs: 150
+  num_epochs: 140
   gradient_accumulate_steps: 1
-  lr: 2e-5
+  lr: 3e-5
   lr_scheduler: cosine
   lr_warmup_steps: 1000
   weight_decay: 1.0e-3
-  checkpoint_every: 50
+  checkpoint_every: 10
   gradient_accumulate_every: 1
   use_ema: True
-  rollout_every: 1
-  val_every: 1
-  sample_every: 5
-  max_train_steps: null
-  max_val_steps: null
+  rollout_every: 5
+  val_every: 2
+  sample_every: 20
+  max_train_steps: 1500
+  max_val_steps: 150
   tqdm_interval_sec: 1.0
 
 optimizer:
@@ -93,36 +93,37 @@ logging:
   resume: True
   mode: disabled
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
-  tags: ["${name}", "${task_name}", "combat_obs24_geo39"]
+  tags: ["${name}", "${task_name}", "adsb", "11hist", "120future"]
   id: null
   group: null
 
 checkpoint:
   topk:
-    monitor_key: test_mean_score_path
-    mode: max
+    monitor_key: eval_traj_path_error_pct
+    mode: min
     k: 5
-    format_str: 'epoch={epoch:04d}-test_mean_score_path={test_mean_score_path:.3f}.ckpt'
+    format_str: 'epoch={epoch:04d}-eval_traj_path_error_pct={eval_traj_path_error_pct:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 
-task:
-  env_runner:
-    multi_sample_eval_samples: 20
-    multi_sample_eval_max_batches: 10
-
 dataloader:
-  batch_size: 256
+  batch_size: 128
   num_workers: 8
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 256
-  num_workers: 8
+  batch_size: 128
+  num_workers: 4
   shuffle: False
   pin_memory: True
   persistent_workers: True
+
+task:
+  env_runner:
+    max_batches: 5
+    multi_sample_eval_samples: 20
+    multi_sample_eval_max_batches: 5
 
 _target_: diffusion_policy.workspace.train_diffusion_transformer_lowdim_workspace.TrainDiffusionTransformerLowdimWorkspace

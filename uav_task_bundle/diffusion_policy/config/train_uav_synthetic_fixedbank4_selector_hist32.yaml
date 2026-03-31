@@ -1,0 +1,79 @@
+defaults:
+  - _self_
+
+name: train_uav_synthetic_fixedbank4_selector_hist32
+task_name: uav_synthetic_fixedbank4_selector_hist32
+
+policy:
+  _target_: diffusion_policy.policy.seed_bank_selector_policy.SeedBankSelectorPolicy
+  n_obs_steps: 32
+  obs_dim: 6
+  n_action_steps: 12
+  action_dim: 3
+  hidden_dims: [256, 256, 128]
+  dropout: 0.1
+
+normalizer:
+  mode: gaussian
+
+dataset:
+  _target_: diffusion_policy.dataset.trajectory_candidate_reranker_dataset.TrajectoryCandidateRerankerDataset
+  zarr_path: ${hydra:runtime.cwd}/data/uav_synthetic_selector/uav_synthetic_hist32_fixedbank4_candidates_train.zarr
+
+val_dataset:
+  _target_: diffusion_policy.dataset.trajectory_candidate_reranker_dataset.TrajectoryCandidateRerankerDataset
+  zarr_path: ${hydra:runtime.cwd}/data/uav_synthetic_selector/uav_synthetic_hist32_fixedbank4_candidates_val.zarr
+
+training:
+  device: "cuda:0"
+  seed: 32
+  debug: False
+  resume: False
+  num_epochs: 50
+  gradient_accumulate_every: 1
+  lr: 1.0e-4
+  lr_scheduler: cosine
+  lr_warmup_steps: 200
+  checkpoint_every: 5
+  val_every: 1
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  learning_rate: ${training.lr}
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.95]
+
+logging:
+  project: diffusion_policy_debug
+  resume: True
+  mode: disabled
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "fixedbank4", "hist32"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: val_selector_traj_path_error_pct
+    mode: min
+    k: 5
+    format_str: 'epoch={epoch:04d}-val_selector_traj_path_error_pct={val_selector_traj_path_error_pct:.3f}.ckpt'
+  save_last_ckpt: True
+
+dataloader:
+  batch_size: 256
+  shuffle: True
+  num_workers: 4
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 256
+  shuffle: False
+  num_workers: 2
+  pin_memory: True
+  persistent_workers: True
+
+_target_: diffusion_policy.workspace.train_seed_bank_selector_workspace.TrainSeedBankSelectorWorkspace

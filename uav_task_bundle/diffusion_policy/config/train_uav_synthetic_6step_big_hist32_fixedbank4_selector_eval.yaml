@@ -1,0 +1,16 @@
+defaults:
+  - train_uav_synthetic_6step_big_hist32
+  - _self_
+
+name: train_uav_transformer_synthetic_6step_big_hist32_fixedbank4_selector_eval
+
+task:
+  env_runner:
+    _target_: diffusion_policy.env_runner.uav_synthetic_reranker_offline_runner.UAVSyntheticRerankerOfflineRunner
+    candidate_selection_mode: fixed_bank_selector
+    selection_num_candidates: 4
+    reranker_checkpoint: null
+    selector_checkpoint: null
+    fixed_bank_seed_bank: [101, 202, 303, 404]
+    multi_sample_eval_samples: 1
+    multi_sample_eval_max_batches: null

@@ -12,10 +12,12 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
         candidate_selection_mode="top1",
         selection_num_candidates=None,
         reranker_checkpoint=None,
+        selector_checkpoint=None,
+        fixed_bank_seed_bank=None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        valid_modes = {"top1", "oracle_best_of_n", "reranker_best_of_n"}
+        valid_modes = {"top1", "oracle_best_of_n", "reranker_best_of_n", "fixed_bank_selector"}
         if candidate_selection_mode not in valid_modes:
             raise ValueError(
                 f"candidate_selection_mode must be one of {sorted(valid_modes)}, "
@@ -27,6 +29,11 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
         )
         self.reranker_checkpoint = reranker_checkpoint
         self.reranker = None
+        self.selector_checkpoint = selector_checkpoint
+        self.selector = None
+        if fixed_bank_seed_bank is None:
+            fixed_bank_seed_bank = [101, 202, 303, 404]
+        self.fixed_bank_seed_bank = [int(x) for x in fixed_bank_seed_bank]
         extra_curve_keys = [
             "eval_top1_traj_ade_m",
             "eval_top1_traj_fde_m",
@@ -35,6 +42,13 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
             "eval_reranker_traj_fde_m",
             "eval_reranker_traj_path_error_pct",
             "eval_reranker_gain_traj_path_error_pct",
+            "eval_fixed_bank_selector_traj_ade_m",
+            "eval_fixed_bank_selector_traj_fde_m",
+            "eval_fixed_bank_selector_traj_path_error_pct",
+            "eval_fixed_bank_oracle_traj_ade_m",
+            "eval_fixed_bank_oracle_traj_fde_m",
+            "eval_fixed_bank_oracle_traj_path_error_pct",
+            "eval_fixed_bank_selector_choice_acc",
         ]
         for key in extra_curve_keys:
             if key not in self.curve_keys:
@@ -101,6 +115,42 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
         self.reranker.eval()
         return self.reranker
 
+    def _load_selector(self, device):
+        if self.selector is None:
+            if self.selector_checkpoint is None:
+                raise ValueError("selector_checkpoint is required for fixed_bank_selector mode.")
+            from diffusion_policy.workspace.train_seed_bank_selector_workspace import (
+                TrainSeedBankSelectorWorkspace,
+            )
+
+            workspace = TrainSeedBankSelectorWorkspace.create_from_checkpoint(
+                path=os.path.expanduser(self.selector_checkpoint)
+            )
+            self.selector = workspace.model
+        self.selector.to(device)
+        self.selector.eval()
+        return self.selector
+
+    def _sample_fixed_bank_candidates(self, policy, obs_dict):
+        device = obs_dict["obs"].device
+        pred_action_samples = []
+        for seed in self.fixed_bank_seed_bank:
+            generator = torch.Generator(device=device)
+            generator.manual_seed(int(seed))
+            result = policy.predict_action(obs_dict, generator=generator)
+            pred_action_samples.append(result["action"])
+        return torch.stack(pred_action_samples, dim=0)
+
+    def _select_fixed_bank_selector(self, selector, obs_hist, pred_action_all):
+        cand_action = pred_action_all.transpose(0, 1)
+        cand_rel_pos = torch.cumsum(cand_action, dim=2)
+        selector_result = selector.select_best(
+            obs_hist=obs_hist,
+            cand_action=cand_action,
+            cand_rel_pos=cand_rel_pos,
+        )
+        return selector_result
+
     def _select_reranker_best_of_n(self, reranker, obs_hist, pred_action_all):
         cand_action = pred_action_all.transpose(0, 1)
         cand_rel_pos = torch.cumsum(cand_action, dim=2)
@@ -114,8 +164,11 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
     def run(self, policy):
         device = self.device if self.device is not None else policy.device
         candidate_count = self._resolve_candidate_count()
-        if self.candidate_selection_mode != "top1" and candidate_count <= 1:
-            raise ValueError("selection_num_candidates must be > 1 for non-top1 selection modes.")
+        if self.candidate_selection_mode in {"oracle_best_of_n", "reranker_best_of_n"} and candidate_count <= 1:
+            raise ValueError("selection_num_candidates must be > 1 for non-top1 random candidate modes.")
+        fixed_bank_count = len(self.fixed_bank_seed_bank)
+        if self.candidate_selection_mode == "fixed_bank_selector" and fixed_bank_count <= 1:
+            raise ValueError("fixed_bank_seed_bank must contain more than one seed for fixed_bank_selector mode.")
 
         mse_vals = []
         mae_vals = []
@@ -147,14 +200,33 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
         reranker_path_error_pct_vals = []
         reranker_fde_ratio_pct_vals = []
 
+        fixed_bank_selector_ade_vals = []
+        fixed_bank_selector_fde_vals = []
+        fixed_bank_selector_path_error_pct_vals = []
+        fixed_bank_selector_fde_ratio_pct_vals = []
+        fixed_bank_selector_choice_acc_vals = []
+
+        fixed_bank_oracle_ade_vals = []
+        fixed_bank_oracle_fde_vals = []
+        fixed_bank_oracle_path_error_pct_vals = []
+        fixed_bank_oracle_fde_ratio_pct_vals = []
+
         best_of_n_batch_count = 0
         reranker_batch_count = 0
+        fixed_bank_selector_batch_count = 0
+        fixed_bank_oracle_batch_count = 0
         plot_data_top1 = None
         plot_data_best_of_n = None
         plot_data_reranker = None
+        plot_data_fixed_bank_selector = None
+        plot_data_fixed_bank_oracle = None
+
         reranker_model = None
+        selector_model = None
         if self.reranker_checkpoint is not None or self.candidate_selection_mode == "reranker_best_of_n":
             reranker_model = self._load_reranker(device)
+        if self.selector_checkpoint is not None or self.candidate_selection_mode == "fixed_bank_selector":
+            selector_model = self._load_selector(device)
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_dataloader):
@@ -187,6 +259,9 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
                 top1_fde_vals.append(top1_metrics["traj_fde_m"])
                 top1_path_error_pct_vals.append(top1_metrics["traj_path_error_pct"])
 
+                selected_metrics = top1_metrics
+                selected_pred_m = plot_pred_m
+
                 use_candidate_pool = False
                 if candidate_count > 1:
                     if self.candidate_selection_mode == "top1":
@@ -194,11 +269,8 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
                             self.multi_sample_eval_max_batches is None
                             or (batch_idx + 1) <= self.multi_sample_eval_max_batches
                         )
-                    else:
+                    elif self.candidate_selection_mode in {"oracle_best_of_n", "reranker_best_of_n"}:
                         use_candidate_pool = True
-
-                selected_metrics = top1_metrics
-                selected_pred_m = plot_pred_m
 
                 if use_candidate_pool:
                     pred_action_samples = [top1_pred_action]
@@ -213,7 +285,7 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
                         start_pos_m=plot_start_pos_m,
                     )
                     top1_idx = torch.zeros(pred_action_all.shape[1], device=device, dtype=torch.long)
-                    top1_subset_metrics, top1_subset_pred_m = self._reduce_selected_candidate_metrics(
+                    top1_subset_metrics, _ = self._reduce_selected_candidate_metrics(
                         pred_action_m_all=pred_action_m_all,
                         gt_action_m=plot_gt_m,
                         dist=dist_all,
@@ -303,6 +375,94 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
                             "choice_idx": reranker_idx[: self.plot_num_samples].detach().cpu().numpy(),
                         }
 
+                use_fixed_bank = selector_model is not None or self.candidate_selection_mode == "fixed_bank_selector"
+                if use_fixed_bank:
+                    pred_action_fixed_all = self._sample_fixed_bank_candidates(policy, obs_dict)
+                    pred_action_fixed_m_all = pred_action_fixed_all * self.action_scale_to_meter
+                    fixed_dist_all, fixed_gt_path_len = self._compute_candidate_path_stats(
+                        pred_action_m_all=pred_action_fixed_m_all,
+                        gt_action_m=plot_gt_m,
+                        start_pos_m=plot_start_pos_m,
+                    )
+                    fixed_oracle_metrics, fixed_oracle_pred_action_m, fixed_oracle_idx = self._select_best_of_n_from_stats(
+                        pred_action_m_all=pred_action_fixed_m_all,
+                        gt_action_m=plot_gt_m,
+                        dist=fixed_dist_all,
+                        gt_path_len=fixed_gt_path_len,
+                    )
+                    fixed_bank_oracle_ade_vals.append(fixed_oracle_metrics["traj_ade_m"])
+                    fixed_bank_oracle_fde_vals.append(fixed_oracle_metrics["traj_fde_m"])
+                    fixed_bank_oracle_path_error_pct_vals.append(fixed_oracle_metrics["traj_path_error_pct"])
+                    fixed_bank_oracle_fde_ratio_pct_vals.append(fixed_oracle_metrics["traj_fde_ratio_pct"])
+                    fixed_bank_oracle_batch_count += 1
+
+                    selector_metrics = None
+                    selector_pred_action_m = None
+                    selector_idx = None
+                    selector_probs = None
+                    if selector_model is not None:
+                        selector_result = self._select_fixed_bank_selector(
+                            selector=selector_model,
+                            obs_hist=obs_hist,
+                            pred_action_all=pred_action_fixed_all,
+                        )
+                        selector_idx = selector_result["best_idx"]
+                        selector_probs = selector_result["candidate_probs"]
+                        selector_metrics, selector_pred_action_m = self._reduce_selected_candidate_metrics(
+                            pred_action_m_all=pred_action_fixed_m_all,
+                            gt_action_m=plot_gt_m,
+                            dist=fixed_dist_all,
+                            gt_path_len=fixed_gt_path_len,
+                            choice_idx=selector_idx,
+                        )
+                        fixed_bank_selector_ade_vals.append(selector_metrics["traj_ade_m"])
+                        fixed_bank_selector_fde_vals.append(selector_metrics["traj_fde_m"])
+                        fixed_bank_selector_path_error_pct_vals.append(selector_metrics["traj_path_error_pct"])
+                        fixed_bank_selector_fde_ratio_pct_vals.append(selector_metrics["traj_fde_ratio_pct"])
+                        fixed_bank_selector_choice_acc_vals.append(
+                            (selector_idx == fixed_oracle_idx).float().mean().item()
+                        )
+                        fixed_bank_selector_batch_count += 1
+
+                    if self.candidate_selection_mode == "fixed_bank_selector":
+                        if selector_metrics is None:
+                            raise ValueError("fixed_bank_selector mode requires a valid selector checkpoint.")
+                        selected_metrics = selector_metrics
+                        selected_pred_m = selector_pred_action_m
+
+                    if self.save_plots and (self.plot_action or self.plot_trajectory3d) and (plot_data_fixed_bank_oracle is None):
+                        plot_data_fixed_bank_oracle = {
+                            "pred": fixed_oracle_pred_action_m[: self.plot_num_samples].detach().cpu().numpy(),
+                            "gt": plot_gt_m[: self.plot_num_samples].detach().cpu().numpy(),
+                            "start_pos": plot_start_pos_m[: self.plot_num_samples].detach().cpu().numpy(),
+                            "obs_pos_full": (
+                                batch["obs"][: self.plot_num_samples, :, self.position_slice]
+                                * self.action_scale_to_meter
+                            ).detach().cpu().numpy(),
+                            "n_obs_steps": int(policy.n_obs_steps),
+                            "variant_tag": f"fixedbank{fixed_bank_count}_oracle",
+                            "variant_title": f"fixed-bank-{fixed_bank_count} oracle",
+                            "pred_label": f"fixedbank{fixed_bank_count}_oracle",
+                            "choice_idx": fixed_oracle_idx[: self.plot_num_samples].detach().cpu().numpy(),
+                        }
+                    if selector_pred_action_m is not None and self.save_plots and (self.plot_action or self.plot_trajectory3d) and (plot_data_fixed_bank_selector is None):
+                        choice_prob = selector_probs.gather(1, selector_idx[:, None]).squeeze(1)
+                        plot_data_fixed_bank_selector = {
+                            "pred": selector_pred_action_m[: self.plot_num_samples].detach().cpu().numpy(),
+                            "gt": plot_gt_m[: self.plot_num_samples].detach().cpu().numpy(),
+                            "start_pos": plot_start_pos_m[: self.plot_num_samples].detach().cpu().numpy(),
+                            "obs_pos_full": (
+                                batch["obs"][: self.plot_num_samples, :, self.position_slice]
+                                * self.action_scale_to_meter
+                            ).detach().cpu().numpy(),
+                            "n_obs_steps": int(policy.n_obs_steps),
+                            "variant_tag": f"fixedbank{fixed_bank_count}_selector",
+                            "variant_title": f"fixed-bank-{fixed_bank_count} selector",
+                            "pred_label": f"fixedbank{fixed_bank_count}_selector",
+                            "choice_idx": selector_idx[: self.plot_num_samples].detach().cpu().numpy(),
+                            "choice_prob": choice_prob[: self.plot_num_samples].detach().cpu().numpy(),
+                        }
+
                 mse_vals.append(selected_metrics["action_mse"])
                 mae_vals.append(selected_metrics["action_mae"])
                 ade_vals.append(selected_metrics["traj_ade_m"])
@@ -390,6 +550,40 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
                     "eval_reranker_samples": float(candidate_count),
                     "eval_reranker_batches": float(reranker_batch_count),
                 })
+            if fixed_bank_oracle_batch_count > 0:
+                fixed_bank_oracle_ade = float(sum(fixed_bank_oracle_ade_vals) / len(fixed_bank_oracle_ade_vals))
+                fixed_bank_oracle_fde = float(sum(fixed_bank_oracle_fde_vals) / len(fixed_bank_oracle_fde_vals))
+                fixed_bank_oracle_path_error_pct = float(sum(fixed_bank_oracle_path_error_pct_vals) / len(fixed_bank_oracle_path_error_pct_vals))
+                metrics.update({
+                    "eval_fixed_bank_oracle_traj_ade_m": fixed_bank_oracle_ade,
+                    "eval_fixed_bank_oracle_traj_fde_m": fixed_bank_oracle_fde,
+                    "eval_fixed_bank_oracle_traj_path_error_pct": fixed_bank_oracle_path_error_pct,
+                    "eval_fixed_bank_oracle_traj_fde_ratio_pct": float(sum(fixed_bank_oracle_fde_ratio_pct_vals) / len(fixed_bank_oracle_fde_ratio_pct_vals)),
+                    "eval_fixed_bank_oracle_samples": float(fixed_bank_count),
+                    "eval_fixed_bank_oracle_batches": float(fixed_bank_oracle_batch_count),
+                })
+            if fixed_bank_selector_batch_count > 0:
+                fixed_bank_selector_ade = float(sum(fixed_bank_selector_ade_vals) / len(fixed_bank_selector_ade_vals))
+                fixed_bank_selector_fde = float(sum(fixed_bank_selector_fde_vals) / len(fixed_bank_selector_fde_vals))
+                fixed_bank_selector_path_error_pct = float(sum(fixed_bank_selector_path_error_pct_vals) / len(fixed_bank_selector_path_error_pct_vals))
+                fixed_bank_selector_choice_acc = float(sum(fixed_bank_selector_choice_acc_vals) / len(fixed_bank_selector_choice_acc_vals))
+                fixed_bank_oracle_ade = float(sum(fixed_bank_oracle_ade_vals) / len(fixed_bank_oracle_ade_vals))
+                fixed_bank_oracle_fde = float(sum(fixed_bank_oracle_fde_vals) / len(fixed_bank_oracle_fde_vals))
+                fixed_bank_oracle_path_error_pct = float(sum(fixed_bank_oracle_path_error_pct_vals) / len(fixed_bank_oracle_path_error_pct_vals))
+                top1_ref = float(sum(top1_path_error_pct_vals) / len(top1_path_error_pct_vals)) if top1_path_error_pct_vals else float("nan")
+                metrics.update({
+                    "eval_fixed_bank_selector_traj_ade_m": fixed_bank_selector_ade,
+                    "eval_fixed_bank_selector_traj_fde_m": fixed_bank_selector_fde,
+                    "eval_fixed_bank_selector_traj_path_error_pct": fixed_bank_selector_path_error_pct,
+                    "eval_fixed_bank_selector_traj_fde_ratio_pct": float(sum(fixed_bank_selector_fde_ratio_pct_vals) / len(fixed_bank_selector_fde_ratio_pct_vals)),
+                    "eval_fixed_bank_selector_choice_acc": fixed_bank_selector_choice_acc,
+                    "eval_fixed_bank_selector_gain_traj_path_error_pct": top1_ref - fixed_bank_selector_path_error_pct,
+                    "eval_fixed_bank_selector_oracle_gap_traj_ade_m": fixed_bank_selector_ade - fixed_bank_oracle_ade,
+                    "eval_fixed_bank_selector_oracle_gap_traj_fde_m": fixed_bank_selector_fde - fixed_bank_oracle_fde,
+                    "eval_fixed_bank_selector_oracle_gap_traj_path_error_pct": fixed_bank_selector_path_error_pct - fixed_bank_oracle_path_error_pct,
+                    "eval_fixed_bank_selector_samples": float(fixed_bank_count),
+                    "eval_fixed_bank_selector_batches": float(fixed_bank_selector_batch_count),
+                })
 
         if self.save_plots and (self.eval_count % self.plot_interval == 0):
             os.makedirs(self.plot_dir, exist_ok=True)
@@ -408,6 +602,16 @@ class UAVSyntheticRerankerOfflineRunner(UAVCombatOfflineRunner):
                     self._save_action_plot(plot_data_best_of_n)
                 if self.plot_trajectory3d:
                     self._save_trajectory3d_plots(plot_data_best_of_n)
+            if plot_data_fixed_bank_selector is not None:
+                if self.plot_action:
+                    self._save_action_plot(plot_data_fixed_bank_selector)
+                if self.plot_trajectory3d:
+                    self._save_trajectory3d_plots(plot_data_fixed_bank_selector)
+            if plot_data_fixed_bank_oracle is not None:
+                if self.plot_action:
+                    self._save_action_plot(plot_data_fixed_bank_oracle)
+                if self.plot_trajectory3d:
+                    self._save_trajectory3d_plots(plot_data_fixed_bank_oracle)
             if self.plot_curves:
                 self._save_curve_plot()
 

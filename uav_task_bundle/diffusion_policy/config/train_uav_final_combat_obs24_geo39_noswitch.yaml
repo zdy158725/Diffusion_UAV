@@ -1,8 +1,8 @@
 defaults:
-  - _self_
   - task: uav_combat_obs24_geo39
+  - _self_
 
-name: train_uav_transformer_combat_obs24_geo39
+name: train_uav_transformer_combat_obs24_geo39_noswitch
 task_name: ${task.name}
 
 horizon: 30
@@ -93,7 +93,7 @@ logging:
   resume: True
   mode: disabled
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
-  tags: ["${name}", "${task_name}", "combat_obs24_geo39"]
+  tags: ["${name}", "${task_name}", "combat_obs24_geo39", "noswitch"]
   id: null
   group: null
 
@@ -107,6 +107,9 @@ checkpoint:
   save_last_snapshot: False
 
 task:
+  name: uav_combat_obs24_geo39_noswitch
+  dataset:
+    zarr_path: ${hydra:runtime.cwd}/data/uav_combat/test_data.zarr
   env_runner:
     multi_sample_eval_samples: 20
     multi_sample_eval_max_batches: 10
