@@ -40,7 +40,7 @@ def parse_args():
         description=(
             "Convert raw ADS-B CSV data into diffusion-policy zarr format "
             "with obs=[x,y,z,vx,vy,vz,wind_speed,wind_dir_sin,wind_dir_cos] "
-            "and action=delta_position."
+            "and action target configurable as delta_position or absolute_position."
         )
     )
     parser.add_argument(
@@ -108,6 +108,16 @@ def parse_args():
         help=(
             "Per-axis quantile of |delta_position| used for action normalization "
             "scale. 1.0 falls back to raw max."
+        ),
+    )
+    parser.add_argument(
+        "--action_target_type",
+        type=str,
+        default="delta_position",
+        choices=["delta_position", "absolute_position"],
+        help=(
+            "Target stored in uav_actions. delta_position keeps the current setup; "
+            "absolute_position stores per-step absolute xyz in the shared coordinate frame."
         ),
     )
     parser.add_argument(
@@ -407,12 +417,19 @@ def resample_episode(
     return obs
 
 
-def compute_action_from_obs(obs: np.ndarray) -> np.ndarray:
+def compute_action_from_obs(
+    obs: np.ndarray,
+    action_target_type: str = "delta_position",
+) -> np.ndarray:
     pos = obs[:, 0:3]
-    action = np.zeros_like(pos, dtype=np.float32)
-    if len(pos) > 1:
-        action[1:] = pos[1:] - pos[:-1]
-    return action
+    if action_target_type == "delta_position":
+        action = np.zeros_like(pos, dtype=np.float32)
+        if len(pos) > 1:
+            action[1:] = pos[1:] - pos[:-1]
+        return action
+    if action_target_type == "absolute_position":
+        return pos.astype(np.float32, copy=True)
+    raise ValueError(f"Unsupported action_target_type={action_target_type}")
 
 
 def split_obs_by_speed(
@@ -511,6 +528,7 @@ def convert_adsb_csv_dir_to_zarr(
     altitude_unit: str = "ft",
     max_step_speed_mps: float = 200.0,
     delta_scale_quantile: float = 0.999,
+    action_target_type: str = "delta_position",
     origin_mode: str = "fixed_reference",
     reference_lat_deg: Optional[float] = None,
     reference_lon_deg: Optional[float] = None,
@@ -604,7 +622,10 @@ def convert_adsb_csv_dir_to_zarr(
                         short_segments_skipped += 1
                         continue
 
-                    action = compute_action_from_obs(split_obs)
+                    action = compute_action_from_obs(
+                        split_obs,
+                        action_target_type=action_target_type,
+                    )
                     all_obs.append(split_obs)
                     all_actions.append(action)
                     current_idx += len(split_obs)
@@ -630,15 +651,19 @@ def convert_adsb_csv_dir_to_zarr(
     full_actions = np.concatenate(all_actions, axis=0).astype(np.float32)
     episode_ends_arr = np.asarray(episode_ends, dtype=np.int64)
 
-    raw_max_abs_delta, scale_abs_delta = compute_action_scale_abs(
-        full_actions=full_actions,
-        delta_scale_quantile=delta_scale_quantile,
-    )
+    raw_max_abs_action = np.max(np.abs(full_actions.astype(np.float32, copy=False)), axis=0)
+    raw_max_abs_action = np.maximum(raw_max_abs_action, 1e-6)
+    scale_abs_action = None
+    if action_target_type == "delta_position":
+        _, scale_abs_action = compute_action_scale_abs(
+            full_actions=full_actions,
+            delta_scale_quantile=delta_scale_quantile,
+        )
 
     store = zarr.DirectoryStore(str(output_root))
     root = zarr.group(store=store, overwrite=True)
     root.attrs["author"] = "OpenAI Codex"
-    root.attrs["version"] = "1.1-adsb-raw-lowdim-wind9d"
+    root.attrs["version"] = "1.2-adsb-raw-lowdim-wind9d"
     root.attrs["description"] = (
         "Single-aircraft ADS-B trajectories converted to diffusion-policy zarr "
         "with fixed/global or episode-local xy coordinates, altitude in meters, "
@@ -657,10 +682,12 @@ def convert_adsb_csv_dir_to_zarr(
         "wind_dir_cos",
     ]
     root.attrs["obs_dim"] = OBS_DIM
-    root.attrs["action_target"] = "delta_position"
-    root.attrs["delta_max_abs"] = raw_max_abs_delta.tolist()
-    root.attrs["delta_scale_abs"] = scale_abs_delta.tolist()
-    root.attrs["delta_scale_quantile"] = float(delta_scale_quantile)
+    root.attrs["action_target"] = action_target_type
+    root.attrs["action_max_abs"] = raw_max_abs_action.tolist()
+    if action_target_type == "delta_position" and scale_abs_action is not None:
+        root.attrs["delta_max_abs"] = raw_max_abs_action.tolist()
+        root.attrs["delta_scale_abs"] = scale_abs_action.tolist()
+        root.attrs["delta_scale_quantile"] = float(delta_scale_quantile)
     root.attrs["meters_per_unit"] = 1.0
     root.attrs["coordinate_frame"] = (
         "fixed_reference_xy_m + altitude_m"
@@ -725,14 +752,16 @@ def convert_adsb_csv_dir_to_zarr(
     print(f"METAR wind valid rows: {valid_rows}")
     print(f"METAR wind parsed successfully: {metar_parse_success}")
     print(f"METAR wind VRB/unsupported count: {metar_vrb_count}")
+    print(f"Action target type: {action_target_type}")
     print(f"Origin mode: {origin_mode}")
     if origin_lat_deg is not None and origin_lon_deg is not None:
         print(f"Reference origin lat/lon: {origin_lat_deg:.6f}, {origin_lon_deg:.6f}")
-    print(f"Raw delta max abs: {raw_max_abs_delta.tolist()}")
-    print(
-        f"Action scale abs (q={delta_scale_quantile}): "
-        f"{scale_abs_delta.tolist()}"
-    )
+    print(f"Raw action max abs: {raw_max_abs_action.tolist()}")
+    if action_target_type == "delta_position" and scale_abs_action is not None:
+        print(
+            f"Action scale abs (q={delta_scale_quantile}): "
+            f"{scale_abs_action.tolist()}"
+        )
 
 
 if __name__ == "__main__":
@@ -748,6 +777,7 @@ if __name__ == "__main__":
         altitude_unit=args.altitude_unit,
         max_step_speed_mps=args.max_step_speed_mps,
         delta_scale_quantile=args.delta_scale_quantile,
+        action_target_type=args.action_target_type,
         origin_mode=args.origin_mode,
         reference_lat_deg=args.reference_lat_deg,
         reference_lon_deg=args.reference_lon_deg,

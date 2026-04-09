@@ -1,0 +1,111 @@
+defaults:
+  - task: uzh_fpv_image
+  - _self_
+
+name: train_uzh_fpv_transformer_hybrid_image_25hist_25future
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+
+horizon: 50
+n_obs_steps: 25
+n_action_steps: 25
+n_latency_steps: 0
+pred_action_steps_only: True
+obs_as_cond: True
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_transformer_hybrid_image_policy.DiffusionTransformerHybridImagePolicy
+  shape_meta: ${shape_meta}
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
+    prediction_type: epsilon
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 10
+  crop_shape: [76, 76]
+  obs_encoder_group_norm: True
+  eval_fixed_crop: False
+  n_layer: 8
+  n_cond_layers: 0
+  n_head: 4
+  n_emb: 256
+  p_drop_emb: 0.0
+  p_drop_attn: 0.1
+  causal_attn: True
+  time_as_cond: True
+  obs_as_cond: ${obs_as_cond}
+  pred_action_steps_only: ${pred_action_steps_only}
+
+training:
+  device: "cuda:2"
+  seed: 42
+  debug: False
+  resume: False
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 300
+  gradient_accumulate_every: 1
+  use_ema: True
+  rollout_every: 5
+  checkpoint_every: 10
+  val_every: 2
+  sample_every: 20
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  transformer_weight_decay: 1.0e-3
+  obs_encoder_weight_decay: 1.0e-6
+  learning_rate: 1.0e-4
+  betas: [0.9, 0.95]
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+logging:
+  project: diffusion_policy_debug
+  resume: True
+  mode: disabled
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "uzh_fpv", "image", "hybrid", "25hist", "25future"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: eval_traj_path_error_pct
+    mode: min
+    k: 5
+    format_str: 'epoch={epoch:04d}-eval_traj_path_error_pct={eval_traj_path_error_pct:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+dataloader:
+  batch_size: 16
+  num_workers: 4
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 16
+  num_workers: 2
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+_target_: diffusion_policy.workspace.train_diffusion_transformer_hybrid_workspace.TrainDiffusionTransformerHybridWorkspace

@@ -1,0 +1,33 @@
+name: uzh_fpv_image
+
+image_shape: &image_shape [3, 96, 96]
+shape_meta: &shape_meta
+  obs:
+    image:
+      shape: *image_shape
+      type: rgb
+    state:
+      shape: [7]
+      type: low_dim
+  action:
+    shape: [3]
+
+env_runner:
+  _target_: diffusion_policy.env_runner.uzh_fpv_image_offline_runner.UZHFPVImageOfflineRunner
+  dataset: ${..dataset}
+  batch_size: ${val_dataloader.batch_size}
+  num_workers: ${val_dataloader.num_workers}
+  pin_memory: ${val_dataloader.pin_memory}
+  device: ${training.device}
+  max_batches: 10
+  multi_sample_eval_samples: 20
+  multi_sample_eval_max_batches: 10
+
+dataset:
+  _target_: diffusion_policy.dataset.uzh_fpv_image_dataset.UZHFPVImageDataset
+  zarr_path: ${hydra:runtime.cwd}/data/uzh_fpv/uzh_fpv_image_96.zarr
+  horizon: ${horizon}
+  pad_before: 0
+  pad_after: 0
+  seed: 42
+  val_ratio: 0.17

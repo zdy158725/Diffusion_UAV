@@ -1,0 +1,34 @@
+name: adsb_trajectory_relpos
+
+obs_dim: 9
+action_dim: 3
+action_target_type: relative_future_position
+n_obs_steps: ${n_obs_steps}
+
+env_runner:
+  _target_: diffusion_policy.env_runner.adsb_absolute_offline_runner.ADSBAbsoluteOfflineRunner
+  dataset: ${..dataset}
+  batch_size: 128
+  num_workers: 0
+  pin_memory: True
+  device: ${training.device}
+  max_batches: 20
+  save_plots: True
+  plot_dir: plots
+  plot_interval: 5
+  plot_num_samples: 2
+  plot_action: False
+  plot_curves: True
+  curve_log_path: logs.json.txt
+
+dataset:
+  _target_: diffusion_policy.dataset.adsb_absolute_lowdim_dataset.ADSBAbsoluteLowdimDataset
+  zarr_path: ${hydra:runtime.cwd}/data/adsb/adsb_7days2_fixedref_wind9d_abspos.zarr
+  obs_slice: [0, 9]
+  n_obs_steps: ${task.n_obs_steps}
+  action_target_type: ${task.action_target_type}
+  horizon: ${horizon}
+  pad_before: 0
+  pad_after: 0
+  seed: 42
+  val_ratio: 0.1

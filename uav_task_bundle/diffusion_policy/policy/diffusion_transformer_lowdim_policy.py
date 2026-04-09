@@ -29,6 +29,7 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             terminal_pos_loss_weight: float=0.0,
             terminal_pos_loss_power: float=1.0,
             relative_path_loss_weight: float=0.0,
+            action_target_type: str='delta_position',
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -59,6 +60,12 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
         self.terminal_pos_loss_weight = float(terminal_pos_loss_weight)
         self.terminal_pos_loss_power = float(terminal_pos_loss_power)
         self.relative_path_loss_weight = float(relative_path_loss_weight)
+        self.action_target_type = str(action_target_type)
+        if self.action_target_type not in {'delta_position', 'relative_future_position'}:
+            raise ValueError(
+                "Unsupported action_target_type="
+                f"{self.action_target_type}. Expected delta_position or relative_future_position."
+            )
         self.kwargs = kwargs
 
         if num_inference_steps is None:
@@ -330,8 +337,12 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
             )
 
             if focus_pred.shape[1] > 0:
-                pred_pos = torch.cumsum(focus_pred, dim=1)
-                target_pos = torch.cumsum(focus_target, dim=1)
+                if self.action_target_type == 'relative_future_position':
+                    pred_pos = self.normalizer['action'].unnormalize(focus_pred)
+                    target_pos = self.normalizer['action'].unnormalize(focus_target)
+                else:
+                    pred_pos = torch.cumsum(focus_pred, dim=1)
+                    target_pos = torch.cumsum(focus_target, dim=1)
                 final_sq_err = (pred_pos[:, -1, :] - target_pos[:, -1, :]) ** 2
                 final_mask = focus_mask[:, -1, :].type(final_sq_err.dtype)
                 denom = final_mask.sum().clamp(min=1.0)
@@ -348,10 +359,22 @@ class DiffusionTransformerLowdimPolicy(BaseLowdimPolicy):
                 # Compute the trajectory ratio in physical action space so it matches eval semantics.
                 pred_action = self.normalizer['action'].unnormalize(focus_pred)
                 target_action = self.normalizer['action'].unnormalize(focus_target)
-                pred_pos = torch.cumsum(pred_action, dim=1)
-                target_pos = torch.cumsum(target_action, dim=1)
+                if self.action_target_type == 'relative_future_position':
+                    current_pos = batch['obs'][
+                        :, self.get_action_anchor_obs_index(), :self.action_dim
+                    ].to(device=pred_action.device, dtype=pred_action.dtype)
+                    pred_pos = current_pos[:, None, :] + pred_action
+                    target_pos = current_pos[:, None, :] + target_action
+                    gt_step = torch.zeros_like(target_pos)
+                    gt_step[:, 0, :] = target_pos[:, 0, :] - current_pos
+                    if target_pos.shape[1] > 1:
+                        gt_step[:, 1:, :] = target_pos[:, 1:, :] - target_pos[:, :-1, :]
+                    gt_path_len = torch.linalg.norm(gt_step, dim=-1).sum(dim=1).clamp(min=1e-6)
+                else:
+                    pred_pos = torch.cumsum(pred_action, dim=1)
+                    target_pos = torch.cumsum(target_action, dim=1)
+                    gt_path_len = torch.linalg.norm(target_action, dim=-1).sum(dim=1).clamp(min=1e-6)
                 step_err = torch.linalg.norm(pred_pos - target_pos, dim=-1)
-                gt_path_len = torch.linalg.norm(target_action, dim=-1).sum(dim=1).clamp(min=1e-6)
                 relative_path_loss = (step_err.sum(dim=1) / gt_path_len).mean()
                 total_loss = total_loss + self.relative_path_loss_weight * relative_path_loss
 
