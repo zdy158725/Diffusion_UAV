@@ -17,6 +17,15 @@ except Exception:
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
 
+STRUCTURED_POLICY_OBS_KEYS = (
+    "obs",
+    "agent_obs",
+    "agent_team",
+    "agent_valid",
+    "agent_social_mask",
+    "agent_role_id",
+)
+
 
 class UAVCombatOfflineRunner(BaseLowdimRunner):
     """
@@ -160,7 +169,9 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_dataloader):
                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                obs_dict = {"obs": batch["obs"]}
+                obs_dict = {
+                    key: batch[key] for key in STRUCTURED_POLICY_OBS_KEYS if key in batch
+                }
                 gt_action = batch["action"]
                 start, end = policy.get_action_window_indices()
                 anchor_idx = policy.get_action_anchor_obs_index()

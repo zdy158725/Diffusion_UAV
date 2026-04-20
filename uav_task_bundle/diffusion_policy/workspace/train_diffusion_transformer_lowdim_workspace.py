@@ -38,6 +38,15 @@ from torchinfo import summary
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
+STRUCTURED_POLICY_OBS_KEYS = (
+    "obs",
+    "agent_obs",
+    "agent_team",
+    "agent_valid",
+    "agent_social_mask",
+    "agent_role_id",
+)
+
 # %%
 class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
@@ -536,7 +545,11 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
-                        obs_dict = {'obs': batch['obs']}
+                        obs_dict = {
+                            key: batch[key]
+                            for key in STRUCTURED_POLICY_OBS_KEYS
+                            if key in batch
+                        }
                         gt_action = batch['action']
                         
                         result = policy.predict_action(obs_dict)

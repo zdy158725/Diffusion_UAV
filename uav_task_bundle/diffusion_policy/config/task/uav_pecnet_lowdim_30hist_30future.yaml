@@ -1,0 +1,42 @@
+name: uav_pecnet_lowdim_30hist_30future
+
+obs_dim: 141
+action_dim: 3
+
+env_runner:
+  _target_: diffusion_policy.env_runner.uav_combat_offline_runner.UAVCombatOfflineRunner
+  dataset: ${..dataset}
+  batch_size: 256
+  num_workers: 0
+  pin_memory: True
+  device: ${training.device}
+  max_batches: 50
+  save_plots: True
+  plot_dir: plots
+  plot_interval: 5
+  plot_num_samples: 2
+  plot_action: True
+  plot_trajectory3d: True
+  plot_curves: True
+  curve_log_path: logs.json.txt
+  multi_sample_eval_samples: 20
+  multi_sample_eval_max_batches: 10
+
+dataset:
+  _target_: diffusion_policy.dataset.uav_pecnet_lowdim_dataset.UAVPECNetLowdimDataset
+  csv_path: ${hydra:runtime.cwd}/baseline/Trajectron++/Trajectron-plus-plus-nuScenes_dataset/data/aircombat_uav_3d.csv
+  split_stats_path: ${hydra:runtime.cwd}/baseline/Trajectron++/Trajectron-plus-plus-nuScenes_dataset/data/processed/aircombat_uav_3d/uav_3d_preprocess_stats.json
+  past_length: 30
+  future_length: 30
+  train_ratio: 0.8
+  split_seed: 123
+  max_train_samples: null
+  max_val_samples: null
+  stats_sample_limit: 50000
+  include_target_abs_pos: True
+  include_context: True
+  include_team_onehot: True
+  include_valid_mask: True
+  include_social_mask: True
+  obs_normalizer_mode: gaussian
+  action_normalizer_mode: gaussian
