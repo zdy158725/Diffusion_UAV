@@ -65,6 +65,7 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
         include_valid_mask=True,
         include_social_mask=True,
         include_structured_fields=False,
+        action_target_type="delta_position",
         obs_normalizer_mode="gaussian",
         action_normalizer_mode="gaussian",
     ):
@@ -92,6 +93,13 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
         self.include_valid_mask = bool(include_valid_mask)
         self.include_social_mask = bool(include_social_mask)
         self.include_structured_fields = bool(include_structured_fields)
+        self.action_target_type = str(action_target_type)
+        if self.action_target_type not in {"delta_position", "relative_future_position"}:
+            raise ValueError(
+                "Unsupported action_target_type="
+                f"{self.action_target_type}. Expected delta_position or "
+                "relative_future_position."
+            )
         self.obs_normalizer_mode = str(obs_normalizer_mode)
         self.action_normalizer_mode = str(action_normalizer_mode)
 
@@ -150,6 +158,11 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
         if self.include_social_mask:
             obs_dim += self.max_agents * self.max_agents
         return int(obs_dim)
+
+    def get_action_window_indices(self):
+        start = self.past_length
+        end = start + self.future_length
+        return start, end
 
     def get_collate_fn(self):
         return None
@@ -297,12 +310,29 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
         future_abs = target_track.position[
             anchor_t + 1 : anchor_t + self.future_length + 1
         ].astype(np.float32, copy=False)
-        full_pos = np.concatenate([target_abs_hist, future_abs], axis=0).astype(
+        future_relpos = (future_abs - anchor_abs[None, :]).astype(np.float32, copy=False)
+        endpoint_target = future_relpos[-1].astype(np.float32, copy=False)
+        interp_scale = (
+            np.arange(1, self.future_length + 1, dtype=np.float32) / float(self.future_length)
+        )[:, None]
+        reference_path_gt = (interp_scale * endpoint_target[None, :]).astype(
+            np.float32,
+            copy=False,
+        )
+        residual_target_gt = (future_relpos - reference_path_gt).astype(
             np.float32,
             copy=False,
         )
         action = np.zeros((self.horizon, 3), dtype=np.float32)
-        action[1:] = full_pos[1:] - full_pos[:-1]
+        if self.action_target_type == "relative_future_position":
+            start_idx, end_idx = self.get_action_window_indices()
+            action[start_idx:end_idx] = future_relpos
+        else:
+            full_pos = np.concatenate([target_abs_hist, future_abs], axis=0).astype(
+                np.float32,
+                copy=False,
+            )
+            action[1:] = full_pos[1:] - full_pos[:-1]
 
         tensors = {
             "target_abs_hist": target_abs_hist,
@@ -312,6 +342,9 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             "valid": valid,
             "social_mask": social_mask,
             "action": action,
+            "endpoint_target": endpoint_target,
+            "reference_path_gt": reference_path_gt,
+            "residual_target_gt": residual_target_gt,
         }
         if self.include_structured_fields:
             tensors.update(
@@ -386,6 +419,24 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             return np.empty((0, self.horizon, self.action_dim), dtype=np.float32)
         return np.stack(action_list, axis=0).astype(np.float32, copy=False)
 
+    def _collect_endpoint_subset(self, sample_indices: Sequence[int]) -> np.ndarray:
+        endpoint_list = []
+        for sample_index in sample_indices:
+            tensors = self._build_agent_tensors(int(sample_index))
+            endpoint_list.append(tensors["endpoint_target"])
+        if not endpoint_list:
+            return np.empty((0, self.action_dim), dtype=np.float32)
+        return np.stack(endpoint_list, axis=0).astype(np.float32, copy=False)
+
+    def _collect_residual_subset(self, sample_indices: Sequence[int]) -> np.ndarray:
+        residual_list = []
+        for sample_index in sample_indices:
+            tensors = self._build_agent_tensors(int(sample_index))
+            residual_list.append(tensors["residual_target_gt"])
+        if not residual_list:
+            return np.empty((0, self.future_length, self.action_dim), dtype=np.float32)
+        return np.stack(residual_list, axis=0).astype(np.float32, copy=False)
+
     def _collect_agent_obs_subset(self, sample_indices: Sequence[int]) -> np.ndarray:
         agent_obs_list = []
         for sample_index in sample_indices:
@@ -405,6 +456,10 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
 
         obs = self._collect_obs_subset(sample_indices)
         action = self._collect_action_subset(sample_indices)
+        action_stats = action
+        if self.action_target_type == "relative_future_position":
+            start, end = self.get_action_window_indices()
+            action_stats = action[:, start:end, :]
 
         normalizer = LinearNormalizer()
         normalizer["obs"] = SingleFieldLinearNormalizer.create_fit(
@@ -413,10 +468,23 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             mode=self.obs_normalizer_mode,
         )
         normalizer["action"] = SingleFieldLinearNormalizer.create_fit(
-            action,
+            action_stats,
             last_n_dims=1,
             mode=self.action_normalizer_mode,
         )
+        if self.action_target_type == "relative_future_position":
+            endpoint_target = self._collect_endpoint_subset(sample_indices)
+            residual_action = self._collect_residual_subset(sample_indices)
+            normalizer["endpoint_target"] = SingleFieldLinearNormalizer.create_fit(
+                endpoint_target,
+                last_n_dims=1,
+                mode=self.action_normalizer_mode,
+            )
+            normalizer["residual_action"] = SingleFieldLinearNormalizer.create_fit(
+                residual_action,
+                last_n_dims=1,
+                mode=self.action_normalizer_mode,
+            )
         if self.include_structured_fields:
             agent_obs = self._collect_agent_obs_subset(sample_indices)
             normalizer["agent_obs"] = SingleFieldLinearNormalizer.create_fit(
@@ -441,6 +509,14 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             "obs": torch.from_numpy(obs),
             "action": torch.from_numpy(action),
         }
+        if self.action_target_type == "relative_future_position":
+            item.update(
+                {
+                    "endpoint_target": torch.from_numpy(tensors["endpoint_target"]),
+                    "reference_path_gt": torch.from_numpy(tensors["reference_path_gt"]),
+                    "residual_target_gt": torch.from_numpy(tensors["residual_target_gt"]),
+                }
+            )
         if self.include_structured_fields:
             item.update(
                 {

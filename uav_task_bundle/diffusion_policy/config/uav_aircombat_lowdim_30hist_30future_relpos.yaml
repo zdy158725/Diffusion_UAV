@@ -1,0 +1,124 @@
+defaults:
+  - task: uav_pecnet_lowdim_30hist_30future_relpos
+  - _self_
+
+name: train_uav_pecnet_lowdim_30hist_30future_relpos
+task_name: ${task.name}
+
+horizon: 60
+n_obs_steps: 30
+n_action_steps: 30
+n_latency_steps: 0
+pred_action_steps_only: True
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_transformer_lowdim_policy.DiffusionTransformerLowdimPolicy
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  obs_dim: ${task.obs_dim}
+  action_dim: ${task.action_dim}
+  obs_as_cond: True
+  pred_action_steps_only: ${pred_action_steps_only}
+  velocity_loss_weight: 0.0
+  short_horizon_loss_weight: 0.0
+  terminal_pos_loss_weight: 0.0
+  relative_path_loss_weight: 0.0
+  short_horizon_focus_steps: 10
+  short_horizon_focus_gain: 3.0
+  action_target_type: relative_future_position
+  model:
+    _target_: diffusion_policy.model.diffusion.transformer_for_diffusion.TransformerForDiffusion
+    input_dim: ${task.action_dim}
+    output_dim: ${task.action_dim}
+    horizon: ${horizon}
+    n_obs_steps: ${n_obs_steps}
+    cond_dim: ${task.obs_dim}
+    n_layer: 8
+    n_head: 8
+    n_emb: 256
+    p_drop_emb: 0.1
+    p_drop_attn: 0.1
+    n_cond_layers: 4
+    causal_attn: True
+    time_as_cond: True
+    obs_as_cond: True
+  num_inference_steps: 10
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: linear
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
+    prediction_type: epsilon
+
+training:
+  device: "cuda:3"
+  seed: 123
+  debug: False
+  resume: False
+  num_epochs: 80
+  gradient_accumulate_steps: 1
+  lr: 3e-5
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  weight_decay: 1.0e-3
+  checkpoint_every: 10
+  gradient_accumulate_every: 1
+  use_ema: True
+  rollout_every: 10
+  val_every: 10
+  sample_every: 20
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  learning_rate: ${training.lr}
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.95]
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+logging:
+  project: diffusion_policy_debug
+  resume: True
+  mode: disabled
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "pecnet_input_adapter", "30hist_30future", "relpos"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: eval_traj_path_error_pct
+    mode: min
+    k: 5
+    format_str: 'epoch={epoch:04d}-eval_traj_path_error_pct={eval_traj_path_error_pct:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+dataloader:
+  batch_size: 256
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 256
+  num_workers: 4
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+_target_: diffusion_policy.workspace.train_diffusion_transformer_lowdim_workspace.TrainDiffusionTransformerLowdimWorkspace

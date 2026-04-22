@@ -1,0 +1,83 @@
+defaults:
+  - task: uav_pecnet_lowdim_30hist_30future_structured_relpos
+  - _self_
+
+name: train_uav_pecnet_lowdim_30hist_30future_structured_endpoint
+task_name: ${task.name}
+
+structured_cond_dim: 256
+relation_hidden_dim: 128
+
+policy:
+  _target_: diffusion_policy.model.diffusion.structured_uav_endpoint_predictor.StructuredUAVEndpointPredictor
+  endpoint_dim: ${task.action_dim}
+  hidden_dim: ${structured_cond_dim}
+  loss_type: mse
+  structured_obs_encoder:
+    _target_: diffusion_policy.model.diffusion.structured_uav_obs_encoder.StructuredUAVObsEncoder
+    max_agents: 6
+    agent_state_dim: 7
+    team_dim: 2
+    slot_count: 6
+    role_count: 4
+    hidden_dim: ${structured_cond_dim}
+    relation_hidden_dim: ${relation_hidden_dim}
+    num_heads: 4
+    dropout: 0.1
+
+training:
+  device: "cuda:3"
+  seed: 123
+  debug: False
+  resume: False
+  num_epochs: 80
+  gradient_accumulate_steps: 1
+  lr: 3e-5
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  weight_decay: 1.0e-3
+  checkpoint_every: 10
+  gradient_accumulate_every: 1
+  val_every: 10
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  learning_rate: ${training.lr}
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.95]
+
+logging:
+  project: diffusion_policy_debug
+  resume: True
+  mode: disabled
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "structured_cond", "30hist_30future", "endpoint"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: val_endpoint_fde_m
+    mode: min
+    k: 5
+    format_str: "epoch={epoch:04d}-val_endpoint_fde_m={val_endpoint_fde_m:.3f}.ckpt"
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+dataloader:
+  batch_size: 256
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 256
+  num_workers: 4
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+_target_: diffusion_policy.workspace.train_structured_uav_endpoint_workspace.TrainStructuredUAVEndpointWorkspace

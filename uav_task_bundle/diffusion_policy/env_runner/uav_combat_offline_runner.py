@@ -108,11 +108,33 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         )
         self.eval_count = 0
 
-    def _compute_path_stats(self, pred_action_m, gt_action_m, start_pos_m):
-        pred_xyz = start_pos_m[:, None, :] + torch.cumsum(pred_action_m, dim=1)
-        gt_xyz = start_pos_m[:, None, :] + torch.cumsum(gt_action_m, dim=1)
+    def _get_action_target_type(self, policy=None):
+        if policy is not None and hasattr(policy, "action_target_type"):
+            return str(policy.action_target_type)
+        return str(getattr(self.dataset, "action_target_type", "delta_position"))
+
+    @staticmethod
+    def _actions_to_future_xyz(action_m, start_pos_m, action_target_type):
+        start_pos_expanded = start_pos_m.unsqueeze(-2)
+        if action_target_type == "relative_future_position":
+            return start_pos_expanded + action_m
+        return start_pos_expanded + torch.cumsum(action_m, dim=-2)
+
+    def _compute_gt_path_len(self, gt_action_m, start_pos_m, action_target_type):
+        if action_target_type == "relative_future_position":
+            gt_xyz = self._actions_to_future_xyz(gt_action_m, start_pos_m, action_target_type)
+            gt_step = torch.zeros_like(gt_xyz)
+            gt_step[:, 0, :] = gt_xyz[:, 0, :] - start_pos_m
+            if gt_xyz.shape[1] > 1:
+                gt_step[:, 1:, :] = gt_xyz[:, 1:, :] - gt_xyz[:, :-1, :]
+            return torch.linalg.norm(gt_step, dim=-1).sum(dim=1).clamp(min=1e-6)
+        return torch.linalg.norm(gt_action_m, dim=-1).sum(dim=1).clamp(min=1e-6)
+
+    def _compute_path_stats(self, pred_action_m, gt_action_m, start_pos_m, action_target_type):
+        pred_xyz = self._actions_to_future_xyz(pred_action_m, start_pos_m, action_target_type)
+        gt_xyz = self._actions_to_future_xyz(gt_action_m, start_pos_m, action_target_type)
         dist = torch.linalg.norm(pred_xyz - gt_xyz, dim=-1)
-        gt_path_len = torch.linalg.norm(gt_action_m, dim=-1).sum(dim=1).clamp(min=1e-6)
+        gt_path_len = self._compute_gt_path_len(gt_action_m, start_pos_m, action_target_type)
         return dist, gt_path_len
 
     def _reduce_metrics(self, pred_action_m, gt_action_m, dist, gt_path_len):
@@ -131,11 +153,13 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             "traj_fde_ratio_pct": fde_ratio_pct.item(),
         }
 
-    def _select_best_of_n(self, pred_action_m_all, gt_action_m, start_pos_m):
-        pred_xyz = start_pos_m[None, :, None, :] + torch.cumsum(pred_action_m_all, dim=2)
-        gt_xyz = start_pos_m[None, :, None, :] + torch.cumsum(gt_action_m[None, :, :, :], dim=2)
+    def _select_best_of_n(self, pred_action_m_all, gt_action_m, start_pos_m, action_target_type):
+        pred_xyz = self._actions_to_future_xyz(pred_action_m_all, start_pos_m, action_target_type)
+        gt_xyz = self._actions_to_future_xyz(
+            gt_action_m[None, :, :, :], start_pos_m, action_target_type
+        )
         dist = torch.linalg.norm(pred_xyz - gt_xyz, dim=-1)
-        gt_path_len = torch.linalg.norm(gt_action_m, dim=-1).sum(dim=1).clamp(min=1e-6)
+        gt_path_len = self._compute_gt_path_len(gt_action_m, start_pos_m, action_target_type)
         path_error_pct = dist.sum(dim=2) / gt_path_len[None, :] * 100.0
         best_idx = torch.argmin(path_error_pct, dim=0)
         batch_idx = torch.arange(gt_action_m.shape[0], device=gt_action_m.device)
@@ -146,6 +170,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
 
     def run(self, policy):
         device = self.device if self.device is not None else policy.device
+        action_target_type = self._get_action_target_type(policy)
         mse_vals = []
         mae_vals = []
         ade_vals = []
@@ -198,6 +223,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                     pred_action_m=plot_pred_m,
                     gt_action_m=plot_gt_m,
                     start_pos_m=plot_start_pos_m,
+                    action_target_type=action_target_type,
                 )
                 top1_metrics = self._reduce_metrics(
                     pred_action_m=plot_pred_m,
@@ -230,6 +256,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                             pred_action_m_all=pred_action_m_all,
                             gt_action_m=plot_gt_m,
                             start_pos_m=plot_start_pos_m,
+                            action_target_type=action_target_type,
                         )
                         top1_subset_ade_vals.append(top1_metrics["traj_ade_m"])
                         top1_subset_fde_vals.append(top1_metrics["traj_fde_m"])
@@ -257,6 +284,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                                 "variant_title": f"best-of-{self.multi_sample_eval_samples}",
                                 "pred_label": f"best_of_{self.multi_sample_eval_samples}",
                                 "choice_idx": best_idx[: self.plot_num_samples].detach().cpu().numpy(),
+                                "action_target_type": action_target_type,
                             }
 
                 if self.save_plots and (self.plot_action or self.plot_trajectory3d) and (plot_data_top1 is None):
@@ -272,6 +300,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                         "variant_tag": "top1",
                         "variant_title": "top-1",
                         "pred_label": "top1_pred",
+                        "action_target_type": action_target_type,
                     }
 
                 if (self.max_batches is not None) and (batch_idx + 1 >= self.max_batches):
@@ -376,6 +405,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         variant_title = plot_data.get("variant_title", "prediction")
         pred_label = plot_data.get("pred_label", "pred_future")
         choice_idx = plot_data.get("choice_idx", None)
+        action_target_type = plot_data.get("action_target_type", "delta_position")
         if pred.ndim != 3 or gt.ndim != 3:
             return
         n_samples = pred.shape[0]
@@ -390,13 +420,17 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 history = obs_pos_full[s, :n_obs_steps]
             else:
                 history = start_pos[s : s + 1]
-            future_gt = None
-            if obs_pos_full is not None:
-                future_end = min(n_obs_steps + t_steps, obs_pos_full.shape[1])
-                future_gt = obs_pos_full[s, n_obs_steps:future_end]
-            pred_future = history[-1:] + np.cumsum(pred[s], axis=0)
-            if future_gt is None or future_gt.shape[0] != t_steps:
-                future_gt = history[-1:] + np.cumsum(gt[s], axis=0)
+            if action_target_type == "relative_future_position":
+                future_gt = history[-1:] + gt[s]
+                pred_future = history[-1:] + pred[s]
+            else:
+                future_gt = None
+                if obs_pos_full is not None:
+                    future_end = min(n_obs_steps + t_steps, obs_pos_full.shape[1])
+                    future_gt = obs_pos_full[s, n_obs_steps:future_end]
+                pred_future = history[-1:] + np.cumsum(pred[s], axis=0)
+                if future_gt is None or future_gt.shape[0] != t_steps:
+                    future_gt = history[-1:] + np.cumsum(gt[s], axis=0)
 
             history_x = np.arange(history.shape[0])
             gt_future_plot = np.concatenate([history[-1:], future_gt], axis=0)
@@ -420,7 +454,12 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 ax_delta = axes[row, col]
                 ax_delta.plot(x_delta, gt[s, :, d], label="gt", linewidth=1.0)
                 ax_delta.plot(x_delta, pred[s, :, d], label="pred", linewidth=1.0)
-                ax_delta.set_title(f"delta dim {d}")
+                if action_target_type == "relative_future_position":
+                    ax_delta.set_title(f"future relpos dim {d}")
+                    ax_delta.set_ylabel("m")
+                else:
+                    ax_delta.set_title(f"delta dim {d}")
+                    ax_delta.set_ylabel("m/step")
                 m = max(
                     np.max(np.abs(gt[s, :, d])),
                     np.max(np.abs(pred[s, :, d]))
@@ -428,7 +467,6 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
                 if m < 1e-6:
                     m = 1e-3
                 ax_delta.set_ylim(-1.2 * m, 1.2 * m)
-                ax_delta.set_ylabel("m/step")
                 ax_delta.grid(True, alpha=0.25)
                 if d == 0:
                     ax_delta.legend(loc="upper right", fontsize=8)
@@ -491,8 +529,13 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             choice_text = ""
             if choice_idx is not None:
                 choice_text = f", choice {int(choice_idx[s])}"
+            title_prefix = (
+                "UAV future relative position + absolute trajectory"
+                if action_target_type == "relative_future_position"
+                else "UAV delta + full absolute trajectory"
+            )
             fig.suptitle(
-                f"UAV delta + full absolute trajectory ({variant_title}, eval {self.eval_count}, sample {s}{choice_text})"
+                f"{title_prefix} ({variant_title}, eval {self.eval_count}, sample {s}{choice_text})"
             )
             fig.tight_layout()
             fig.subplots_adjust(top=0.90)
@@ -511,6 +554,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             start_pos=start_pos,
             obs_pos_full=obs_pos_full,
             choice_idx=choice_idx,
+            action_target_type=action_target_type,
         )
 
     def _save_trajectory3d_plots(self, plot_data):
@@ -525,6 +569,7 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
         variant_title = plot_data.get("variant_title", "prediction")
         pred_label = plot_data.get("pred_label", "pred_future")
         choice_idx = plot_data.get("choice_idx", None)
+        action_target_type = plot_data.get("action_target_type", "delta_position")
         if pred.ndim != 3 or gt.ndim != 3 or pred.shape[2] != 3:
             return
 
@@ -537,13 +582,17 @@ class UAVCombatOfflineRunner(BaseLowdimRunner):
             if history.shape[-1] != 3:
                 continue
 
-            future_gt = None
-            if obs_pos_full is not None:
-                future_end = min(n_obs_steps + pred.shape[1], obs_pos_full.shape[1])
-                future_gt = obs_pos_full[s, n_obs_steps:future_end]
-            pred_future = history[-1:] + np.cumsum(pred[s], axis=0)
-            if future_gt is None or future_gt.shape[0] != pred.shape[1]:
-                future_gt = history[-1:] + np.cumsum(gt[s], axis=0)
+            if action_target_type == "relative_future_position":
+                future_gt = history[-1:] + gt[s]
+                pred_future = history[-1:] + pred[s]
+            else:
+                future_gt = None
+                if obs_pos_full is not None:
+                    future_end = min(n_obs_steps + pred.shape[1], obs_pos_full.shape[1])
+                    future_gt = obs_pos_full[s, n_obs_steps:future_end]
+                pred_future = history[-1:] + np.cumsum(pred[s], axis=0)
+                if future_gt is None or future_gt.shape[0] != pred.shape[1]:
+                    future_gt = history[-1:] + np.cumsum(gt[s], axis=0)
 
             self._save_trajectory3d_plot(
                 history_xyz=history,

@@ -107,6 +107,15 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
 
+        endpoint_ckpt = OmegaConf.select(cfg, "endpoint_pretrained_ckpt", default=None)
+        should_load_endpoint_ckpt = (
+            endpoint_ckpt is not None and self.global_step == 0 and self.epoch == 0
+        )
+        if should_load_endpoint_ckpt and hasattr(self.model, "load_endpoint_predictor"):
+            self.model.load_endpoint_predictor(endpoint_ckpt)
+            if self.ema_model is not None and hasattr(self.ema_model, "load_endpoint_predictor"):
+                self.ema_model.load_endpoint_predictor(endpoint_ckpt)
+
         # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
