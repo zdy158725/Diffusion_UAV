@@ -66,6 +66,7 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
         include_social_mask=True,
         include_structured_fields=False,
         action_target_type="delta_position",
+        coarse_waypoint_steps=(10, 20, 30),
         obs_normalizer_mode="gaussian",
         action_normalizer_mode="gaussian",
     ):
@@ -100,6 +101,18 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
                 f"{self.action_target_type}. Expected delta_position or "
                 "relative_future_position."
             )
+        self.coarse_waypoint_steps = tuple(int(step) for step in coarse_waypoint_steps)
+        if len(self.coarse_waypoint_steps) == 0:
+            raise ValueError("coarse_waypoint_steps must contain at least one step.")
+        if tuple(sorted(self.coarse_waypoint_steps)) != self.coarse_waypoint_steps:
+            raise ValueError("coarse_waypoint_steps must be strictly increasing.")
+        if self.coarse_waypoint_steps[-1] != self.future_length:
+            raise ValueError(
+                "The last coarse waypoint step must equal future_length="
+                f"{self.future_length}, got {self.coarse_waypoint_steps[-1]}."
+            )
+        if self.coarse_waypoint_steps[0] <= 0:
+            raise ValueError("coarse_waypoint_steps must be positive 1-indexed steps.")
         self.obs_normalizer_mode = str(obs_normalizer_mode)
         self.action_normalizer_mode = str(action_normalizer_mode)
 
@@ -143,6 +156,53 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
         self.action_dim = 3
         self._normalizer_cache: Optional[LinearNormalizer] = None
         self._all_actions_cache: Optional[np.ndarray] = None
+
+    def _build_piecewise_linear_reference_path_np(
+        self,
+        waypoint_target: np.ndarray,
+    ) -> np.ndarray:
+        coarse_path = np.zeros((self.future_length, self.action_dim), dtype=np.float32)
+        prev_step = 0
+        prev_point = np.zeros((self.action_dim,), dtype=np.float32)
+        for waypoint_idx, step in enumerate(self.coarse_waypoint_steps):
+            point = waypoint_target[waypoint_idx].astype(np.float32, copy=False)
+            segment_len = step - prev_step
+            segment_scale = (
+                np.arange(1, segment_len + 1, dtype=np.float32) / float(segment_len)
+            )[:, None]
+            segment = prev_point[None, :] + segment_scale * (point - prev_point)[None, :]
+            coarse_path[prev_step:step] = segment.astype(np.float32, copy=False)
+            prev_step = step
+            prev_point = point
+        return coarse_path
+
+    def _extract_waypoint_target(self, future_relpos: np.ndarray) -> np.ndarray:
+        waypoint_target = [
+            future_relpos[step - 1].astype(np.float32, copy=False)
+            for step in self.coarse_waypoint_steps
+        ]
+        return np.stack(waypoint_target, axis=0).astype(np.float32, copy=False)
+
+    def _build_accel_base_path_np(
+        self,
+        target_abs_hist: np.ndarray,
+        velocity_window: int = 3,
+        accel_window: int = 3,
+    ) -> np.ndarray:
+        deltas = target_abs_hist[1:] - target_abs_hist[:-1]
+        velocity_window = min(int(velocity_window), deltas.shape[0])
+        velocity = deltas[-velocity_window:].mean(axis=0)
+
+        delta_deltas = deltas[1:] - deltas[:-1]
+        accel_window = min(int(accel_window), delta_deltas.shape[0])
+        accel = delta_deltas[-accel_window:].mean(axis=0)
+
+        future_steps = np.arange(1, self.future_length + 1, dtype=np.float32)[:, None]
+        base_path = (
+            velocity[None, :] * future_steps
+            + 0.5 * accel[None, :] * np.square(future_steps)
+        )
+        return base_path.astype(np.float32, copy=False)
 
     def _infer_obs_dim(self) -> int:
         obs_dim = 0
@@ -211,6 +271,17 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             else:
                 other_team_slots.append(slot)
         return [target_slot] + same_team_slots + other_team_slots
+
+    def _build_target_first_slot_order(self, target_slot: int) -> np.ndarray:
+        slot_order = np.arange(self.max_agents, dtype=np.int64)
+        target_slot = int(target_slot)
+        if target_slot < 0 or target_slot >= self.max_agents:
+            raise ValueError(
+                f"target_slot must be in [0, {self.max_agents}), got {target_slot}."
+            )
+        if target_slot != 0:
+            slot_order[0], slot_order[target_slot] = slot_order[target_slot], slot_order[0]
+        return slot_order
 
     def _build_structured_agent_tensors(
         self,
@@ -305,6 +376,11 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             team[slot] = TEAM_TO_ONEHOT[track.team]
             valid[slot] = 1.0
 
+        slot_order = self._build_target_first_slot_order(target_slot)
+        past = past[slot_order]
+        context = context[slot_order]
+        team = team[slot_order]
+        valid = valid[slot_order]
         social_mask = np.outer(valid, valid).astype(np.float32, copy=False)
 
         future_abs = target_track.position[
@@ -312,6 +388,18 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
         ].astype(np.float32, copy=False)
         future_relpos = (future_abs - anchor_abs[None, :]).astype(np.float32, copy=False)
         endpoint_target = future_relpos[-1].astype(np.float32, copy=False)
+        waypoint_target = self._extract_waypoint_target(future_relpos)
+        accel_base_path = self._build_accel_base_path_np(target_abs_hist)
+        accel_base_anchor = self._extract_waypoint_target(accel_base_path)
+        accel_residual_waypoint_target = (waypoint_target - accel_base_anchor).astype(
+            np.float32,
+            copy=False,
+        )
+        coarse_path_gt = self._build_piecewise_linear_reference_path_np(waypoint_target)
+        coarse_residual_gt = (future_relpos - coarse_path_gt).astype(
+            np.float32,
+            copy=False,
+        )
         interp_scale = (
             np.arange(1, self.future_length + 1, dtype=np.float32) / float(self.future_length)
         )[:, None]
@@ -343,6 +431,11 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             "social_mask": social_mask,
             "action": action,
             "endpoint_target": endpoint_target,
+            "waypoint_target": waypoint_target,
+            "accel_base_anchor": accel_base_anchor,
+            "accel_residual_waypoint_target": accel_residual_waypoint_target,
+            "coarse_path_gt": coarse_path_gt,
+            "coarse_residual_gt": coarse_residual_gt,
             "reference_path_gt": reference_path_gt,
             "residual_target_gt": residual_target_gt,
         }
@@ -437,6 +530,38 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             return np.empty((0, self.future_length, self.action_dim), dtype=np.float32)
         return np.stack(residual_list, axis=0).astype(np.float32, copy=False)
 
+    def _collect_waypoint_subset(self, sample_indices: Sequence[int]) -> np.ndarray:
+        waypoint_list = []
+        for sample_index in sample_indices:
+            tensors = self._build_agent_tensors(int(sample_index))
+            waypoint_list.append(tensors["waypoint_target"])
+        if not waypoint_list:
+            return np.empty((0, len(self.coarse_waypoint_steps), self.action_dim), dtype=np.float32)
+        return np.stack(waypoint_list, axis=0).astype(np.float32, copy=False)
+
+    def _collect_accel_residual_waypoint_subset(
+        self, sample_indices: Sequence[int]
+    ) -> np.ndarray:
+        residual_list = []
+        for sample_index in sample_indices:
+            tensors = self._build_agent_tensors(int(sample_index))
+            residual_list.append(tensors["accel_residual_waypoint_target"])
+        if not residual_list:
+            return np.empty(
+                (0, len(self.coarse_waypoint_steps), self.action_dim),
+                dtype=np.float32,
+            )
+        return np.stack(residual_list, axis=0).astype(np.float32, copy=False)
+
+    def _collect_coarse_residual_subset(self, sample_indices: Sequence[int]) -> np.ndarray:
+        residual_list = []
+        for sample_index in sample_indices:
+            tensors = self._build_agent_tensors(int(sample_index))
+            residual_list.append(tensors["coarse_residual_gt"])
+        if not residual_list:
+            return np.empty((0, self.future_length, self.action_dim), dtype=np.float32)
+        return np.stack(residual_list, axis=0).astype(np.float32, copy=False)
+
     def _collect_agent_obs_subset(self, sample_indices: Sequence[int]) -> np.ndarray:
         agent_obs_list = []
         for sample_index in sample_indices:
@@ -475,6 +600,11 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
         if self.action_target_type == "relative_future_position":
             endpoint_target = self._collect_endpoint_subset(sample_indices)
             residual_action = self._collect_residual_subset(sample_indices)
+            waypoint_target = self._collect_waypoint_subset(sample_indices)
+            accel_residual_waypoint_target = (
+                self._collect_accel_residual_waypoint_subset(sample_indices)
+            )
+            coarse_residual_action = self._collect_coarse_residual_subset(sample_indices)
             normalizer["endpoint_target"] = SingleFieldLinearNormalizer.create_fit(
                 endpoint_target,
                 last_n_dims=1,
@@ -482,6 +612,23 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             )
             normalizer["residual_action"] = SingleFieldLinearNormalizer.create_fit(
                 residual_action,
+                last_n_dims=1,
+                mode=self.action_normalizer_mode,
+            )
+            normalizer["waypoint_target"] = SingleFieldLinearNormalizer.create_fit(
+                waypoint_target,
+                last_n_dims=2,
+                mode=self.action_normalizer_mode,
+            )
+            normalizer["accel_residual_waypoint_target"] = (
+                SingleFieldLinearNormalizer.create_fit(
+                    accel_residual_waypoint_target,
+                    last_n_dims=2,
+                    mode=self.action_normalizer_mode,
+                )
+            )
+            normalizer["coarse_residual_action"] = SingleFieldLinearNormalizer.create_fit(
+                coarse_residual_action,
                 last_n_dims=1,
                 mode=self.action_normalizer_mode,
             )
@@ -513,6 +660,13 @@ class UAVPECNetLowdimDataset(BaseLowdimDataset):
             item.update(
                 {
                     "endpoint_target": torch.from_numpy(tensors["endpoint_target"]),
+                    "waypoint_target": torch.from_numpy(tensors["waypoint_target"]),
+                    "accel_base_anchor": torch.from_numpy(tensors["accel_base_anchor"]),
+                    "accel_residual_waypoint_target": torch.from_numpy(
+                        tensors["accel_residual_waypoint_target"]
+                    ),
+                    "coarse_path_gt": torch.from_numpy(tensors["coarse_path_gt"]),
+                    "coarse_residual_gt": torch.from_numpy(tensors["coarse_residual_gt"]),
                     "reference_path_gt": torch.from_numpy(tensors["reference_path_gt"]),
                     "residual_target_gt": torch.from_numpy(tensors["residual_target_gt"]),
                 }
